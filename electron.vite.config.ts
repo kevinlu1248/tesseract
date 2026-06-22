@@ -26,7 +26,10 @@ export default defineConfig({
     root: resolve(__dirname, 'src/renderer'),
     // Pin the dev port: localStorage is keyed by origin (incl. port), so a
     // stable port lets persisted tabs survive dev restarts too.
-    server: { port: 5273, strictPort: true },
+    // hmr: false — never auto hot-reload or full-reload the renderer on edits
+    // (Fast Refresh falling back to a full reload was resetting the UI). Edits
+    // now apply only on a manual reload (Cmd+R) or relaunch.
+    server: { port: 5273, strictPort: true, hmr: false },
     resolve: {
       alias: {
         '@shared': resolve(__dirname, 'src/shared'),
