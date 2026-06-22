@@ -450,6 +450,10 @@ function install(): void {
     focusWindow: async (): Promise<void> => {
       window.focus()
     },
+    restartApp: async (): Promise<void> => {
+      // No Electron process to relaunch in the browser preview — reload the page.
+      window.location.reload()
+    },
     onSessionEvent: (cb) => {
       listeners.add(cb)
       return () => listeners.delete(cb)

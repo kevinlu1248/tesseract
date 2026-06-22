@@ -163,6 +163,7 @@ export function App() {
         onClose={ws.closeTab}
         onDelete={ws.deleteTab}
         onNew={() => setPicking(true)}
+        onRestart={() => window.api.restartApp()}
         onNewInWorkspace={startNewInWorkspace}
         onCreateWorktree={createWorktree}
         hiddenWorkspaces={state.hiddenWorkspaces}

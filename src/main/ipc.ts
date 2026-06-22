@@ -1,4 +1,4 @@
-import { BrowserWindow, dialog, ipcMain } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import {
   IPC,
   type AnswerPermissionArgs,
@@ -99,6 +99,15 @@ export function registerIpc(getWindow: () => BrowserWindow | null): SessionManag
     if (win.isMinimized()) win.restore()
     win.show()
     win.focus()
+  })
+
+  // Full restart: relaunch a fresh process, then quit this one. `app.quit()`
+  // fires `before-quit`, which tears down every live session's subprocess, so
+  // the new instance starts clean (any stragglers are reaped on boot by
+  // sweepOrphanAgents). The renderer reloads as part of the new process.
+  ipcMain.handle(IPC.appRestart, () => {
+    app.relaunch()
+    app.quit()
   })
 
   return manager

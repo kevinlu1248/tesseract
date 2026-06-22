@@ -57,11 +57,6 @@ function basename(p?: string): string {
   return parts[parts.length - 1] || p
 }
 
-function clamp(text: string, max = 72): string {
-  const oneLine = text.replace(/\s+/g, ' ').trim()
-  return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine
-}
-
 export function ConversationView({
   auth,
   session,
@@ -138,6 +133,9 @@ export function ConversationView({
   // fallbacks immediately and patch each card in place as its summary arrives
   // over the onSessionSummaryUpdated push channel.
   const [cards, setCards] = useState<SessionCard[]>([])
+  // Session ids we've already kicked off lazy generation for, so a card that
+  // re-enters the viewport doesn't fire a duplicate request.
+  const requested = useRef<Set<string>>(new Set())
   // Key the fetch off `tab.cwd`, not `session.cwd`: the tab's cwd is known the
   // moment the tab is created, whereas session.cwd is only populated once the
   // backend streams its first event. A fresh, never-messaged session has no
@@ -146,6 +144,7 @@ export function ConversationView({
   useEffect(() => {
     if (!tab.cwd) return
     let alive = true
+    requested.current = new Set()
     window.api
       .getSessionSummaries(tab.cwd, tab.provider)
       .then((list) => {
@@ -164,6 +163,21 @@ export function ConversationView({
       unsubscribe()
     }
   }, [tab.cwd, tab.provider])
+
+  // Lazily generate a card's AI summary the first time it scrolls into view.
+  // The result streams back over the onSessionSummaryUpdated channel above
+  // (and patches the card), so we only need to fire the request once per id.
+  const requestSummary = useCallback(
+    (sessionId: string) => {
+      if (!tab.cwd || requested.current.has(sessionId)) return
+      requested.current.add(sessionId)
+      window.api.generateSessionSummary(sessionId, tab.cwd, tab.provider).catch(() => {
+        // Allow a retry on a later reveal if the request failed outright.
+        requested.current.delete(sessionId)
+      })
+    },
+    [tab.cwd, tab.provider]
+  )
 
   const centered = phase === 'centered'
   const floating = phase !== 'docked'
@@ -311,23 +325,13 @@ export function ConversationView({
                     </div>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                       {cards.map((card) => (
-                        <button
+                        <RecentCard
                           key={card.sessionId}
-                          onClick={() => onResumeConversation(card.sessionId)}
-                          title={card.description ?? card.title}
-                          className="group text-left px-3.5 py-2.5 rounded-xl border border-ink-700 bg-ink-850 hover:border-accent/70 hover:bg-ink-800 transition-colors"
-                        >
-                          <div className="text-[13px] font-medium text-ink-100 truncate group-hover:text-white">
-                            {clamp(card.title, 60)}
-                          </div>
-                          <div className="mt-0.5 text-[12px] text-ink-400 line-clamp-2 min-h-[2.25em]">
-                            {card.description ?? (
-                              <span className="italic text-ink-500">
-                                {card.pending ? 'Summarizing…' : 'No description'}
-                              </span>
-                            )}
-                          </div>
-                        </button>
+                          card={card}
+                          active={centered}
+                          onResume={onResumeConversation}
+                          onVisible={requestSummary}
+                        />
                       ))}
                     </div>
                   </>

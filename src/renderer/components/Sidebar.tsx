@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { LuGitBranch } from 'react-icons/lu'
+import { LuGitBranch, LuRotateCw } from 'react-icons/lu'
 import type { BackendProvider, SessionStatus } from '../../shared/ipc'
 import { dotFor, type DotState, type Tab } from '../state/workspaceStore'
 import { TAB_DND_MIME } from './Pane'
@@ -16,6 +16,8 @@ interface Props {
   onDelete: (localId: string) => void
   /** Open the picker to add a brand-new workspace (repo). */
   onNew: () => void
+  /** Restart the whole app — frontend + backend. */
+  onRestart: () => void
   /** Start a new chat inside an already-open workspace, no picker. */
   onNewInWorkspace: (cwd: string, provider: BackendProvider) => void
   /** Create a git worktree off a workspace and open a session in it. */
@@ -229,6 +231,7 @@ export function Sidebar({
   onClose,
   onDelete,
   onNew,
+  onRestart,
   onNewInWorkspace,
   onCreateWorktree,
   hiddenWorkspaces,
@@ -271,7 +274,8 @@ export function Sidebar({
       style={{ width }}
       className="shrink-0 flex flex-col border-r border-ink-800 bg-ink-900/60"
     >
-      <div className="app-drag h-11 flex items-center px-3 border-b border-ink-800">
+      <div className="app-drag h-11 flex items-center gap-2 px-3 border-b border-ink-800">
+        <img src="/icon.svg" alt="Tesseract" className="w-5 h-5 rounded-md shrink-0" />
         <button
           onClick={onToggleCollapse}
           title="Collapse sidebar (⌘B)"
@@ -280,9 +284,18 @@ export function Sidebar({
           «
         </button>
         <button
+          onClick={() => {
+            if (window.confirm('Restart Tesseract? This closes all running sessions.')) onRestart()
+          }}
+          title="Restart the app (frontend + backend)"
+          className="no-drag ml-auto grid place-items-center px-1.5 py-1 rounded-lg text-ink-400 hover:text-ink-100 hover:bg-ink-800 transition-colors"
+        >
+          <LuRotateCw size={14} aria-hidden />
+        </button>
+        <button
           onClick={onNew}
           title="Open another workspace"
-          className="no-drag ml-auto px-2.5 py-1 rounded-lg bg-ink-700 hover:bg-ink-600 text-ink-100 text-[12px] font-semibold transition-colors"
+          className="no-drag ml-1.5 px-2.5 py-1 rounded-lg bg-ink-700 hover:bg-ink-600 text-ink-100 text-[12px] font-semibold transition-colors"
         >
           + Workspace
         </button>

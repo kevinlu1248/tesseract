@@ -41,6 +41,7 @@ const api: WorkspaceApi = {
     ipcRenderer.invoke(IPC.sessionSummarize, args),
   getRecentScreenshot: () => ipcRenderer.invoke(IPC.screenshotRecent),
   focusWindow: () => ipcRenderer.invoke(IPC.windowFocus),
+  restartApp: () => ipcRenderer.invoke(IPC.appRestart),
   onSessionEvent: (cb: (env: SessionEventEnvelope) => void) => {
     const listener = (_e: IpcRendererEvent, env: SessionEventEnvelope): void => cb(env)
     ipcRenderer.on(IPC.sessionEvent, listener)

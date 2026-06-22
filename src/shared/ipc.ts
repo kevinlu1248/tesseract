@@ -36,6 +36,8 @@ export const IPC = {
   screenshotRecent: 'screenshot:recent',
   /** Bring the app window to the foreground (e.g. from a notification click). */
   windowFocus: 'window:focus',
+  /** Relaunch the whole app — tears down every session, then restarts the process. */
+  appRestart: 'app:restart',
   /** main → renderer push channel */
   sessionEvent: 'session:event'
 } as const
@@ -301,6 +303,8 @@ export interface WorkspaceApi {
   getRecentScreenshot(): Promise<RecentScreenshot | null>
   /** Bring the app window to the foreground (used by notification clicks). */
   focusWindow(): Promise<void>
+  /** Restart the entire app (main + renderer): closes all sessions, then relaunches. */
+  restartApp(): Promise<void>
   /** Subscribe to streamed session events; returns an unsubscribe fn. */
   onSessionEvent(cb: (env: SessionEventEnvelope) => void): () => void
   /** Subscribe to background-completed session cards; returns an unsubscribe fn. */
