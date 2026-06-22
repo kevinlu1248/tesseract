@@ -220,6 +220,28 @@ export class AgentSdkAdapter implements BackendAdapter {
   }
 
   private onMessage(message: RawSdkMessage): void {
+    if (process.env.CCW_DEBUG_RAW) {
+      const m = message as RawSdkMessage & {
+        parent_tool_use_id?: unknown
+        event?: { type?: string; parent_tool_use_id?: unknown }
+        message?: { content?: unknown }
+      }
+      const content = (m.message?.content ?? m.event) as unknown
+      const blocks = Array.isArray(content)
+        ? content.map((b) => (b as { type?: string }).type)
+        : typeof content === 'object' && content
+          ? (content as { type?: string }).type
+          : undefined
+      // eslint-disable-next-line no-console
+      console.error(
+        '[RAW]',
+        m.type,
+        'parent_tool_use_id=',
+        JSON.stringify(m.parent_tool_use_id ?? m.event?.parent_tool_use_id ?? null),
+        'blocks=',
+        JSON.stringify(blocks)
+      )
+    }
     const events = this.translator.handle(message, Date.now())
     for (const event of events) {
       this.emit({ kind: 'cc', event })

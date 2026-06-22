@@ -374,7 +374,7 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
       className={
         centered
           ? 'no-drag'
-          : 'border-t border-ink-800 bg-ink-900/80 px-6 py-3 no-drag'
+          : 'bg-ink-900/80 px-6 py-3 no-drag'
       }
     >
       <div className="max-w-3xl mx-auto">

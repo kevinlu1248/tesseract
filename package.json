@@ -6,6 +6,7 @@
   "description": "Desktop workspace for Claude Code — agent output rendered as React DOM, never a terminal emulator.",
   "main": "./out/main/index.js",
   "scripts": {
+    "predev": "sh scripts/patch-dev-name.sh",
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
