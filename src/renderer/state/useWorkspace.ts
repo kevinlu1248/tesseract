@@ -272,15 +272,18 @@ export function useWorkspace() {
         // Prefer the live session's id; fall back to the tab's seeded resume id
         // so a tab still persists while its session is (re)acquiring its id.
         const sid = s.sessions[t.localId]?.sdkSessionId ?? t.sdkSessionId
-        return sid
-          ? {
-              cwd: t.cwd,
-              provider: t.provider,
-              title: t.title,
-              sdkSessionId: sid,
-              archived: t.archived
-            }
-          : null
+        // Persist every non-archived tab so the FULL set of open workspaces
+        // comes back on restart — even ones never messaged (no session id yet;
+        // restored as a fresh suspended session). Archived tabs persist only if
+        // they have a resumable session.
+        if (!sid && t.archived) return null
+        return {
+          cwd: t.cwd,
+          provider: t.provider,
+          title: t.title,
+          sdkSessionId: sid,
+          archived: t.archived
+        }
       })
       .filter((t): t is PersistedTab => t !== null)
     try {
@@ -311,18 +314,21 @@ export function useWorkspace() {
       try {
         for (const t of saved) {
           try {
-            if (!t.sdkSessionId) continue
             // Lazy restore: bring the tab back as SUSPENDED — load its history
-            // for display but DO NOT spawn a subprocess. It resumes (--resume)
-            // only when the user focuses or messages it. This is what prevents a
-            // launch from spawning one agent per saved tab (the freeze).
-            const items = await window.api
-              .loadHistory({
-                sessionId: t.sdkSessionId,
-                cwd: t.cwd,
-                provider: t.provider ?? 'claude'
-              })
-              .catch(() => [] as TranscriptItem[])
+            // for display (if it has a resumable session) but DO NOT spawn a
+            // subprocess. It resumes (--resume) only on focus/message. A tab
+            // opened but never messaged (no session id) is restored fresh so its
+            // workspace still reappears. This also prevents a launch from
+            // spawning one agent per saved tab (the freeze).
+            const items = t.sdkSessionId
+              ? await window.api
+                  .loadHistory({
+                    sessionId: t.sdkSessionId,
+                    cwd: t.cwd,
+                    provider: t.provider ?? 'claude'
+                  })
+                  .catch(() => [] as TranscriptItem[])
+              : []
             const localId = newLocalId()
             dispatch({
               t: 'openTab',
