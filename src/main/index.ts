@@ -9,6 +9,12 @@ import { registerIpc } from './ipc'
 // package name. Packaged builds also pick up `productName` from package.json.
 app.setName('Claude Workspace')
 
+// setName() ALSO relocates the userData dir (to ".../Claude Workspace"), which
+// would strand the existing localStorage — saved tabs, titles, drafts — in the
+// old ".../claude-workspace" dir. Pin userData back to that stable location so
+// renaming the app never orphans persisted state.
+app.setPath('userData', join(app.getPath('appData'), 'claude-workspace'))
+
 let mainWindow: BrowserWindow | null = null
 
 /** App icon shipped at <root>/build/icon.png (empty image if missing — never throws). */
