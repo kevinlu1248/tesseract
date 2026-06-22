@@ -6,6 +6,7 @@ import {
   type BackendProvider,
   type ReviveSessionArgs,
   type SendArgs,
+  type SessionCardUpdate,
   type SessionEventEnvelope,
   type StartSessionArgs
 } from '../shared/ipc'
@@ -26,7 +27,16 @@ export function registerIpc(getWindow: () => BrowserWindow | null): SessionManag
       /* frame torn down mid-send — drop this event */
     }
   }
-  const manager = new SessionManager(broadcast)
+  const broadcastSummary = (update: SessionCardUpdate): void => {
+    const win = getWindow()
+    if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return
+    try {
+      win.webContents.send(IPC.sessionSummaryUpdated, update)
+    } catch {
+      /* frame torn down mid-send — drop this update */
+    }
+  }
+  const manager = new SessionManager(broadcast, broadcastSummary)
 
   ipcMain.handle(IPC.authGet, () => detectAuth())
 
@@ -56,6 +66,9 @@ export function registerIpc(getWindow: () => BrowserWindow | null): SessionManag
   )
   ipcMain.handle(IPC.sessionList, (_e, cwd: string, provider?: BackendProvider) =>
     manager.listSessions(cwd, provider)
+  )
+  ipcMain.handle(IPC.sessionSummaries, (_e, cwd: string, provider?: BackendProvider) =>
+    manager.getSessionSummaries(cwd, provider)
   )
   ipcMain.handle(
     IPC.sessionLoadHistory,

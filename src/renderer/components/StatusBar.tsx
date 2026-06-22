@@ -1,5 +1,6 @@
 import type { AuthInfo, SessionStatus } from '../../shared/ipc'
 import { contextWindowFor, formatTokens } from '../../shared/schema'
+import { TAB_DND_MIME } from './Pane'
 
 const STATUS_META: Record<SessionStatus, { label: string; color: string; pulse?: boolean }> = {
   starting: { label: 'Starting', color: '#7b8699', pulse: true },
@@ -24,7 +25,19 @@ interface Props {
   onClosePane?: () => void
   /** Open a new session beside this pane as a split. */
   onNewPane?: () => void
+  /** Present only on the leftmost pane while the sidebar is hidden — reveals it. */
+  onShowSidebar?: () => void
+  /**
+   * When set (i.e. this pane is part of a split), the status bar becomes a drag
+   * handle for repositioning the pane: dragging it onto another pane's left/right
+   * half moves this session there. The value is the pane's session `localId`.
+   */
+  reorderId?: string
 }
+
+// macOS uses an inset title bar (hiddenInset), so when the sidebar is hidden the
+// leftmost status bar must leave room for the traffic lights at the top-left.
+const IS_MAC = typeof navigator !== 'undefined' && navigator.platform.toUpperCase().includes('MAC')
 
 // Warm/red as the window fills; calm gray-blue while there's headroom.
 function gaugeColor(pct: number): string {
@@ -62,11 +75,41 @@ export function StatusBar({
   contextTokens,
   onClose,
   onClosePane,
-  onNewPane
+  onNewPane,
+  onShowSidebar,
+  reorderId
 }: Props) {
   const meta = STATUS_META[status]
+  const reorderable = reorderId != null
   return (
-    <div className="app-drag flex items-center gap-3 px-4 h-11 border-b border-ink-800 bg-ink-900/90 text-[12px] select-none">
+    <div
+      // While split, the bar is a pane-reorder drag source (and thus `no-drag`,
+      // since `-webkit-app-region: drag` would otherwise swallow the HTML5 drag);
+      // a lone pane keeps `app-drag` so the bar still moves the OS window.
+      draggable={reorderable}
+      onDragStart={
+        reorderable
+          ? (e) => {
+              e.dataTransfer.setData(TAB_DND_MIME, reorderId)
+              e.dataTransfer.effectAllowed = 'move'
+            }
+          : undefined
+      }
+      title={reorderable ? 'Drag to reposition this pane' : undefined}
+      className={`${
+        reorderable ? 'no-drag cursor-grab active:cursor-grabbing' : 'app-drag'
+      } flex items-center gap-3 px-4 h-11 border-b border-ink-800 bg-ink-900/90 text-[12px] select-none`}
+      style={onShowSidebar && IS_MAC ? { paddingLeft: 76 } : undefined}
+    >
+      {onShowSidebar && (
+        <button
+          onClick={onShowSidebar}
+          title="Show sidebar (⌘B)"
+          className="no-drag -ml-1 text-ink-400 hover:text-ink-100 px-1.5 py-1 rounded-lg hover:bg-ink-800 text-[15px] leading-none transition-colors"
+        >
+          »
+        </button>
+      )}
       <div className="flex items-center gap-2 no-drag">
         <span
           className={`inline-block w-2 h-2 rounded-full ${meta.pulse ? 'pulse' : ''}`}
@@ -83,7 +126,14 @@ export function StatusBar({
       {contextTokens != null && contextTokens > 0 && (
         <ContextGauge tokens={contextTokens} model={model} />
       )}
-      {model && <span className="text-ink-400 font-mono no-drag">{model}</span>}
+      {model && (
+        <span
+          className="text-ink-400 font-mono no-drag truncate min-w-0 max-w-[180px] shrink"
+          title={model}
+        >
+          {model}
+        </span>
+      )}
       {onNewPane && (
         <button
           onClick={onNewPane}

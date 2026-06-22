@@ -11,6 +11,8 @@ import type {
   AnswerPermissionArgs,
   AnswerQuestionArgs,
   SendArgs,
+  SessionCard,
+  SessionCardUpdate,
   SessionEventEnvelope,
   SessionSummary,
   StartSessionArgs,
@@ -21,8 +23,21 @@ import { AgentSdkAdapter } from '../backend/AgentSdkAdapter'
 import type { BackendAdapter } from '../backend/BackendAdapter'
 import { CodexCliAdapter } from '../backend/CodexCliAdapter'
 import { listCodexSessions, loadCodexHistory } from '../backend/codexHistory'
+import { generateSummary } from '../backend/generateSummary'
 import { generateTitle } from '../backend/generateTitle'
 import { loadSdk } from '../backend/sdk'
+import { SummaryCache } from './summaryCache'
+
+/** How many recent conversations the new-message screen shows as cards. */
+const MAX_CARDS = 6
+/** Cap concurrent background summary generations to stay light on the model. */
+const SUMMARY_CONCURRENCY = 2
+
+/** Collapse a raw summary/prompt into a single-line snippet title fallback. */
+function snippet(s: SessionSummary, max = 60): string {
+  const text = (s.firstPrompt || s.summary || s.sessionId).replace(/\s+/g, ' ').trim()
+  return text.length > max ? `${text.slice(0, max)}…` : text
+}
 
 interface SessionRecord {
   localId: string
@@ -34,8 +49,15 @@ interface SessionRecord {
 
 export class SessionManager {
   private sessions = new Map<string, SessionRecord>()
+  private summaryCache = new SummaryCache()
+  /** Session ids whose summary is currently being generated (de-dupes work). */
+  private generating = new Set<string>()
 
-  constructor(private readonly emit: (env: SessionEventEnvelope) => void) {}
+  constructor(
+    private readonly emit: (env: SessionEventEnvelope) => void,
+    /** Push a background-completed card to the renderer (optional in tests). */
+    private readonly emitSummary?: (update: SessionCardUpdate) => void
+  ) {}
 
   /** Spawn an adapter under a specific localId and wire its events to the UI. */
   private async startAdapter(
@@ -147,6 +169,82 @@ export class SessionManager {
    */
   generateTitle(firstMessage: string): Promise<string | null> {
     return generateTitle(firstMessage)
+  }
+
+  /**
+   * Recent conversations as cards for the new-message screen. Returns
+   * immediately with cached AI summaries where available and snippet fallbacks
+   * elsewhere; any card still missing its AI summary is generated in the
+   * background and pushed back via {@link emitSummary}.
+   */
+  async getSessionSummaries(
+    cwd: string,
+    provider: BackendProvider = 'claude'
+  ): Promise<SessionCard[]> {
+    const summaries = (await this.listSessions(cwd, provider)).slice(0, MAX_CARDS)
+    const cards: SessionCard[] = []
+    const pending: SessionSummary[] = []
+    for (const s of summaries) {
+      const cached = await this.summaryCache.getFresh(s.sessionId, s.lastModified)
+      cards.push({
+        sessionId: s.sessionId,
+        title: cached ? cached.title : snippet(s),
+        description: cached ? cached.description : null,
+        lastModified: s.lastModified,
+        firstPrompt: s.firstPrompt,
+        provider,
+        pending: !cached
+      })
+      if (!cached) pending.push(s)
+    }
+    // Fire-and-forget: results stream back to the renderer as each completes.
+    void this.generateSummariesInBackground(cwd, provider, pending)
+    return cards
+  }
+
+  /** Generate the missing summaries with bounded concurrency; push each result. */
+  private async generateSummariesInBackground(
+    cwd: string,
+    provider: BackendProvider,
+    summaries: SessionSummary[]
+  ): Promise<void> {
+    const queue = summaries.filter((s) => !this.generating.has(s.sessionId))
+    queue.forEach((s) => this.generating.add(s.sessionId))
+
+    const worker = async (): Promise<void> => {
+      for (;;) {
+        const s = queue.shift()
+        if (!s) return
+        try {
+          const result = await generateSummary(s.firstPrompt ?? '', s.summary ?? '')
+          if (result) {
+            await this.summaryCache.set(s.sessionId, {
+              title: result.title,
+              description: result.description,
+              lastModified: s.lastModified
+            })
+          }
+          this.emitSummary?.({
+            cwd,
+            provider,
+            card: {
+              sessionId: s.sessionId,
+              title: result ? result.title : snippet(s),
+              description: result ? result.description : null,
+              lastModified: s.lastModified,
+              firstPrompt: s.firstPrompt,
+              provider,
+              pending: false
+            }
+          })
+        } finally {
+          this.generating.delete(s.sessionId)
+        }
+      }
+    }
+
+    const workers = Array.from({ length: Math.min(SUMMARY_CONCURRENCY, queue.length) }, worker)
+    await Promise.all(workers)
   }
 
   async loadHistory(args: {

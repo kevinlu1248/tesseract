@@ -58,7 +58,13 @@ export function Pane({ focused, split, onFocus, onDropTab, children }: Props) {
       }}
       className={`relative flex-1 min-w-0 flex flex-col overflow-hidden ${
         split ? 'border-l border-ink-800 first:border-l-0' : ''
-      } ${focused && split ? 'z-10 ring-1 ring-inset ring-accent/50' : ''}`}
+      } ${
+        split
+          ? focused
+            ? 'z-10 ring-1 ring-inset ring-accent/50'
+            : 'ring-1 ring-inset ring-accent/15'
+          : ''
+      }`}
     >
       {children}
 

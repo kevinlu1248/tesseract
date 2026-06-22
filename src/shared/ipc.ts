@@ -20,8 +20,12 @@ export const IPC = {
   permissionAnswer: 'permission:answer',
   questionAnswer: 'question:answer',
   sessionList: 'session:list',
+  /** List recent conversations enriched with AI title + description (cards). */
+  sessionSummaries: 'session:summaries',
   sessionLoadHistory: 'session:load-history',
   sessionGenerateTitle: 'session:generate-title',
+  /** main → renderer: a background-generated session card is ready. */
+  sessionSummaryUpdated: 'session:summary-updated',
   /** Look up the most recently captured screenshot (for the "add to context" chip). */
   screenshotRecent: 'screenshot:recent',
   /** Bring the app window to the foreground (e.g. from a notification click). */
@@ -172,6 +176,33 @@ export interface SessionSummary {
   provider?: BackendProvider
 }
 
+/**
+ * A recent conversation rendered as a "pick up where you left off" card on the
+ * new-message screen. The title/description are AI-generated in the background;
+ * until that completes, `description` is null, `pending` is true, and `title`
+ * holds a plain-text snippet fallback.
+ */
+export interface SessionCard {
+  sessionId: string
+  /** AI-generated short title, or a snippet fallback while pending. */
+  title: string
+  /** AI-generated one-to-two sentence description; null until generated. */
+  description: string | null
+  lastModified: number
+  firstPrompt?: string
+  provider?: BackendProvider
+  /** True while the AI title/description are still being generated. */
+  pending: boolean
+}
+
+/** A background-completed card, pushed to the renderer to patch its list. */
+export interface SessionCardUpdate {
+  /** The repo the card belongs to — the renderer ignores updates for other cwds. */
+  cwd: string
+  provider: BackendProvider
+  card: SessionCard
+}
+
 /* ─────────────────── The surface exposed on window.api ───────────────── */
 
 export interface WorkspaceApi {
@@ -186,6 +217,13 @@ export interface WorkspaceApi {
   answerPermission(args: AnswerPermissionArgs): Promise<void>
   answerQuestion(args: AnswerQuestionArgs): Promise<void>
   listSessions(cwd: string, provider?: BackendProvider): Promise<SessionSummary[]>
+  /**
+   * Recent conversations as cards (title + AI description) for the new-message
+   * screen. Returns immediately with cached/fallback values; any card whose
+   * description is still pending is generated in the background, then delivered
+   * via onSessionSummaryUpdated.
+   */
+  getSessionSummaries(cwd: string, provider?: BackendProvider): Promise<SessionCard[]>
   loadHistory(args: {
     sessionId: string
     cwd: string
@@ -202,6 +240,8 @@ export interface WorkspaceApi {
   focusWindow(): Promise<void>
   /** Subscribe to streamed session events; returns an unsubscribe fn. */
   onSessionEvent(cb: (env: SessionEventEnvelope) => void): () => void
+  /** Subscribe to background-completed session cards; returns an unsubscribe fn. */
+  onSessionSummaryUpdated(cb: (update: SessionCardUpdate) => void): () => void
 }
 
 export type { CcEvent, SessionStatus, TranscriptItem }

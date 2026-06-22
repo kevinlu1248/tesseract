@@ -4,15 +4,15 @@ import { app, BrowserWindow, nativeImage, shell } from 'electron'
 import { registerIpc } from './ipc'
 
 // Set the app name as early as possible (before `ready` / any menu is built) so
-// the macOS menu bar, About/Hide/Quit items, and notifications read "Claude
-// Workspace" instead of "Electron" (the dev binary's bundle name) or the bare
-// package name. Packaged builds also pick up `productName` from package.json.
-app.setName('Claude Workspace')
+// the macOS menu bar, About/Hide/Quit items, and notifications read "Tesseract"
+// instead of "Electron" (the dev binary's bundle name) or the bare package
+// name. Packaged builds also pick up `productName` from package.json.
+app.setName('Tesseract')
 
-// setName() ALSO relocates the userData dir (to ".../Claude Workspace"), which
-// would strand the existing localStorage — saved tabs, titles, drafts — in the
-// old ".../claude-workspace" dir. Pin userData back to that stable location so
-// renaming the app never orphans persisted state.
+// setName() ALSO relocates the userData dir (to ".../Tesseract"), which would
+// strand the existing localStorage — saved tabs, titles, drafts — in the dir
+// from a previous name. Pin userData to the original stable "claude-workspace"
+// location so renaming the app never orphans persisted state.
 app.setPath('userData', join(app.getPath('appData'), 'claude-workspace'))
 
 let mainWindow: BrowserWindow | null = null
@@ -43,7 +43,7 @@ function createWindow(): void {
     minHeight: 480,
     show: false,
     backgroundColor: '#0b0d12',
-    title: 'Claude Workspace',
+    title: 'Tesseract',
     icon: appIcon.isEmpty() ? undefined : appIcon,
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     webPreferences: {

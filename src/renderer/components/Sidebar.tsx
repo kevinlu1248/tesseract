@@ -24,6 +24,10 @@ interface Props {
   /** Reopen a hidden workspace, restoring its non-archived sessions. */
   onOpenWorkspace: (cwd: string) => void
   width: number
+  /** When true, the sidebar collapses to a thin rail with just an expand button. */
+  collapsed: boolean
+  /** Toggle the collapsed state. */
+  onToggleCollapse: () => void
 }
 
 const DOT_COLOR: Record<Exclude<DotState, 'none'>, string> = {
@@ -165,7 +169,9 @@ export function Sidebar({
   hiddenWorkspaces,
   onHideWorkspace,
   onOpenWorkspace,
-  width
+  width,
+  collapsed,
+  onToggleCollapse
 }: Props) {
   const [showArchived, setShowArchived] = useState(false)
   const [showHidden, setShowHidden] = useState(false)
@@ -182,17 +188,26 @@ export function Sidebar({
     count: tabs.filter((t) => t.cwd === cwd && !t.archived).length
   }))
 
+  // Hidden: render nothing — App shows a floating reveal button instead.
+  if (collapsed) return null
+
   return (
     <div
       style={{ width }}
       className="shrink-0 flex flex-col border-r border-ink-800 bg-ink-900/60"
     >
       <div className="app-drag h-11 flex items-center px-3 border-b border-ink-800">
-        <div className="w-16" />
+        <button
+          onClick={onToggleCollapse}
+          title="Collapse sidebar (⌘B)"
+          className="no-drag text-ink-400 hover:text-ink-100 px-1.5 py-1 rounded-lg hover:bg-ink-800 text-[15px] leading-none transition-colors"
+        >
+          «
+        </button>
         <button
           onClick={onNew}
           title="Open another workspace"
-          className="no-drag ml-auto px-2.5 py-1 rounded-lg bg-accent hover:bg-[#5b97f5] text-ink-950 text-[12px] font-semibold transition-colors"
+          className="no-drag ml-auto px-2.5 py-1 rounded-lg bg-ink-700 hover:bg-ink-600 text-ink-100 text-[12px] font-semibold transition-colors"
         >
           + Workspace
         </button>

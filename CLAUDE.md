@@ -2,7 +2,7 @@
 
 ## What this project is
 
-This is **Claude Workspace** — a desktop app (Electron + Vite + React) that is a
+This is **Tesseract** — a desktop app (Electron + Vite + React) that is a
 **custom frontend / GUI for Claude Code**. It runs Claude Code via the
 `@anthropic-ai/claude-agent-sdk` and renders the agent's streamed events as
 **HTML/React DOM** — not in a terminal emulator (no xterm.js, no PTY in the

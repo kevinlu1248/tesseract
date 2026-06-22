@@ -1,4 +1,4 @@
-<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Claude Workspace">
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Tesseract">
   <defs>
     <linearGradient id="bg" x1="64" y1="48" x2="448" y2="464" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#6ea8fe"/>
@@ -15,31 +15,21 @@
   <rect x="32" y="32" width="448" height="448" rx="112" fill="url(#bg)"/>
   <rect x="32" y="32" width="448" height="448" rx="112" fill="url(#sheen)"/>
 
-  <!-- Document window: what the app renders agent output into -->
-  <g>
-    <rect x="120" y="132" width="272" height="248" rx="30" fill="#0b0d12" fill-opacity="0.9"/>
-    <rect x="120" y="132" width="272" height="248" rx="30" stroke="#ffffff" stroke-opacity="0.16" stroke-width="2"/>
+  <!-- Tesseract: a square within a square, corresponding corners joined. -->
+  <g stroke-linecap="round" stroke-linejoin="round" fill="none">
 
-    <!-- Title bar dots -->
-    <circle cx="152" cy="166" r="7" fill="#6ea8fe"/>
-    <circle cx="176" cy="166" r="7" fill="#7e95fb"/>
-    <circle cx="200" cy="166" r="7" fill="#9d7bff"/>
+    <!-- Connecting edges (outer corner -> inner corner) -->
+    <g stroke="#ffffff" stroke-opacity="0.4" stroke-width="6">
+      <line x1="140" y1="140" x2="206" y2="206"/>
+      <line x1="372" y1="140" x2="306" y2="206"/>
+      <line x1="372" y1="372" x2="306" y2="306"/>
+      <line x1="140" y1="372" x2="206" y2="306"/>
+    </g>
 
-    <!-- Pane divider -->
-    <line x1="206" y1="196" x2="206" y2="356" stroke="#ffffff" stroke-opacity="0.12" stroke-width="2"/>
+    <!-- Outer square -->
+    <rect x="140" y="140" width="232" height="232" rx="8" stroke="#ffffff" stroke-width="12"/>
 
-    <!-- Left pane: sidebar -->
-    <rect x="146" y="212" width="40" height="10" rx="5" fill="#566175"/>
-    <rect x="146" y="236" width="40" height="10" rx="5" fill="#3a4459"/>
-    <rect x="146" y="260" width="40" height="10" rx="5" fill="#3a4459"/>
-
-    <!-- Right pane: rendered document lines -->
-    <rect x="226" y="212" width="140" height="11" rx="5.5" fill="#e6e9ef"/>
-    <rect x="226" y="238" width="120" height="11" rx="5.5" fill="#a6b0c0"/>
-    <rect x="226" y="264" width="132" height="11" rx="5.5" fill="#a6b0c0"/>
-    <rect x="226" y="296" width="84" height="11" rx="5.5" fill="#6ea8fe"/>
+    <!-- Inner square -->
+    <rect x="206" y="206" width="100" height="100" rx="6" stroke="#ffffff" stroke-width="10"/>
   </g>
-
-  <!-- AI spark -->
-  <path d="M372 300c1.2 16.8 7 22.6 23.8 23.8-16.8 1.2-22.6 7-23.8 23.8-1.2-16.8-7-22.6-23.8-23.8 16.8-1.2 22.6-7 23.8-23.8Z" fill="#ffffff"/>
 </svg>

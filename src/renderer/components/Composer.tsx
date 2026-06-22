@@ -14,6 +14,34 @@ import type { BackendProvider, RecentScreenshot, SessionStatus } from '../../sha
 import { contextWindowFor, formatTokens, type UiImage } from '../../shared/schema'
 import { isBusy, type QueuedMessage } from '../state/workspaceStore'
 
+// Paths of screenshots the user has already added or dismissed are persisted so
+// a discarded shot never gets re-suggested after a tab switch or app restart.
+const HANDLED_SHOTS_KEY = 'cw.handledShots.v1'
+// Cap the stored list so it can't grow without bound; the main process only
+// surfaces shots from the last few minutes, so recent paths are all that matter.
+const HANDLED_SHOTS_MAX = 200
+
+function loadHandledShots(): Set<string> {
+  try {
+    const raw = localStorage.getItem(HANDLED_SHOTS_KEY)
+    if (!raw) return new Set()
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? new Set(parsed.filter((p): p is string => typeof p === 'string')) : new Set()
+  } catch {
+    return new Set()
+  }
+}
+
+function persistHandledShots(shots: Set<string>): void {
+  try {
+    // Keep only the most-recently-added tail when over the cap.
+    const list = Array.from(shots).slice(-HANDLED_SHOTS_MAX)
+    localStorage.setItem(HANDLED_SHOTS_KEY, JSON.stringify(list))
+  } catch {
+    /* best-effort; ignore quota/serialization errors */
+  }
+}
+
 /** Read an image File into the base64 UiImage shape the model expects. */
 function fileToImage(file: File): Promise<UiImage | null> {
   return new Promise((resolve) => {
@@ -230,7 +258,9 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
   const ref = useRef<HTMLTextAreaElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   // Paths the user has already added or dismissed — never re-suggest them.
-  const handledShots = useRef<Set<string>>(new Set())
+  // Seeded from localStorage so dismissals survive remounts and restarts.
+  const handledShots = useRef<Set<string>>(null as unknown as Set<string>)
+  if (handledShots.current === null) handledShots.current = loadHandledShots()
   const busy = isBusy(status)
 
   // Poll for a freshly-captured screenshot so we can offer a one-click
@@ -260,12 +290,16 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
     if (!recent) return
     setImages((prev) => [...prev, recent.image])
     handledShots.current.add(recent.path)
+    persistHandledShots(handledShots.current)
     setRecent(null)
     ref.current?.focus()
   }
 
   const dismissRecentScreenshot = (): void => {
-    if (recent) handledShots.current.add(recent.path)
+    if (recent) {
+      handledShots.current.add(recent.path)
+      persistHandledShots(handledShots.current)
+    }
     setRecent(null)
   }
 

@@ -10,6 +10,8 @@
 import type {
   AnswerPermissionArgs,
   SendArgs,
+  SessionCard,
+  SessionCardUpdate,
   SessionEventEnvelope,
   StartSessionArgs,
   WorkspaceApi
@@ -18,6 +20,7 @@ import type { TranscriptItem } from '../shared/schema'
 
 function install(): void {
   const listeners = new Set<(e: SessionEventEnvelope) => void>()
+  const summaryListeners = new Set<(u: SessionCardUpdate) => void>()
   const localId = 'mock-session'
   const emit = (event: SessionEventEnvelope['event']): void =>
     listeners.forEach((cb) => cb({ localId, event }))
@@ -306,6 +309,58 @@ function install(): void {
       { sessionId: 's-1', summary: 'Refactor the auth module', lastModified: Date.now() - 3600_000, firstPrompt: 'Refactor auth' },
       { sessionId: 's-2', summary: 'Fix failing CI tests', lastModified: Date.now() - 86400_000 }
     ],
+    getSessionSummaries: async (cwd: string): Promise<SessionCard[]> => {
+      const provider = 'claude' as const
+      const raw: SessionCard[] = [
+        {
+          sessionId: 's-1',
+          title: 'Refactor auth',
+          description: null,
+          lastModified: Date.now() - 3600_000,
+          firstPrompt: 'Refactor the auth module',
+          provider,
+          pending: true
+        },
+        {
+          sessionId: 's-2',
+          title: 'Fix failing CI tests',
+          description: null,
+          lastModified: Date.now() - 86400_000,
+          provider,
+          pending: true
+        }
+      ]
+      // Simulate background generation arriving a beat later.
+      void (async () => {
+        await wait(900)
+        summaryListeners.forEach((cb) =>
+          cb({
+            cwd,
+            provider,
+            card: {
+              ...raw[0],
+              title: 'Auth module refactor',
+              description: 'Restructured the auth module into smaller services and tightened token handling.',
+              pending: false
+            }
+          })
+        )
+        await wait(700)
+        summaryListeners.forEach((cb) =>
+          cb({
+            cwd,
+            provider,
+            card: {
+              ...raw[1],
+              title: 'Green up CI',
+              description: 'Diagnosed and fixed the flaky CI test suite so the pipeline passes reliably.',
+              pending: false
+            }
+          })
+        )
+      })()
+      return raw
+    },
     generateTitle: async (firstMessage: string): Promise<string | null> => {
       await wait(400)
       const words = firstMessage.trim().split(/\s+/).slice(0, 5).join(' ')
@@ -338,12 +393,16 @@ function install(): void {
     onSessionEvent: (cb) => {
       listeners.add(cb)
       return () => listeners.delete(cb)
+    },
+    onSessionSummaryUpdated: (cb) => {
+      summaryListeners.add(cb)
+      return () => summaryListeners.delete(cb)
     }
   }
 
   ;(window as unknown as { api: WorkspaceApi }).api = api
   // eslint-disable-next-line no-console
-  console.log('[claude-workspace] installed browser mock window.api (no Electron preload detected)')
+  console.log('[tesseract] installed browser mock window.api (no Electron preload detected)')
 }
 
 if (typeof window !== 'undefined' && !(window as unknown as { api?: unknown }).api) {

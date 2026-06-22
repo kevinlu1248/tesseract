@@ -1,6 +1,6 @@
-# Claude Workspace
+# Tesseract
 
-A desktop workspace for running **Claude Code**, in the spirit of Superset — with
+A desktop GUI for running **Claude Code**, in the spirit of Superset — with
 one defining difference: **agent output is rendered as HTML/React DOM, never in a
 terminal emulator**. No xterm.js, no PTY in the display path. Structured agent
 events map to React components, and the prompt is a real DOM `<textarea>` so all
@@ -11,7 +11,8 @@ native text editing (`ctrl+A`, `option+arrow`, word-delete, …) works for free.
 ## Quick start
 
 ```bash
-cd ~/claude-workspace
+git clone https://github.com/kevinlu1248/tesseract.git
+cd tesseract
 npm install          # first time only
 npm run dev          # start the app (launches Electron + Vite dev server)
 ```

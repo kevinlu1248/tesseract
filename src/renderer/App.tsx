@@ -32,6 +32,17 @@ export function App() {
       ? Math.min(MAX_SIDEBAR, Math.max(MIN_SIDEBAR, saved))
       : 256
   })
+  // Collapsed sidebar shrinks to a thin rail; persisted across reloads.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => localStorage.getItem('sidebarCollapsed') === '1'
+  )
+  const toggleSidebar = useCallback(() => {
+    setSidebarCollapsed((v) => {
+      const next = !v
+      localStorage.setItem('sidebarCollapsed', next ? '1' : '0')
+      return next
+    })
+  }, [])
   const resizing = useRef(false)
 
   useEffect(() => {
@@ -107,10 +118,14 @@ export function App() {
           startNewInWorkspace(tab.cwd, tab.provider)
         }
       }
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'b' || e.key === 'B')) {
+        e.preventDefault()
+        toggleSidebar()
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [state.activeId, state.tabs, ws, startNewInWorkspace])
+  }, [state.activeId, state.tabs, ws, startNewInWorkspace, toggleSidebar])
 
   // No sessions yet → full-screen launcher.
   if (state.tabs.length === 0) {
@@ -136,20 +151,24 @@ export function App() {
         onHideWorkspace={ws.hideWorkspace}
         onOpenWorkspace={ws.openWorkspace}
         width={sidebarWidth}
+        collapsed={sidebarCollapsed}
+        onToggleCollapse={toggleSidebar}
       />
 
-      <div
-        onMouseDown={startResize}
-        title="Drag to resize sidebar"
-        className="w-1 shrink-0 cursor-col-resize bg-ink-800 hover:bg-accent transition-colors"
-      />
+      {!sidebarCollapsed && (
+        <div
+          onMouseDown={startResize}
+          title="Drag to resize sidebar"
+          className="w-1 shrink-0 cursor-col-resize bg-ink-800 hover:bg-accent transition-colors"
+        />
+      )}
 
       <div className="flex-1 min-w-0 flex flex-col">
         {picking ? (
           <StartScreen onNew={startNew} onResume={resume} onCancel={() => setPicking(false)} />
         ) : panes.length > 0 ? (
           <div className="flex-1 min-h-0 flex">
-            {panes.map(({ tab, session }) => {
+            {panes.map(({ tab, session }, paneIndex) => {
               const id = tab.localId
               const split = panes.length > 1
               return (
@@ -173,12 +192,18 @@ export function App() {
                     onClose={() => ws.closeTab(id)}
                     onClosePane={split ? () => ws.closePane(id) : undefined}
                     onNewPane={() => ws.newPane(tab.cwd, tab.provider)}
+                    onResumeConversation={(sessionId) =>
+                      resume(tab.cwd, sessionId, true, tab.provider)
+                    }
                     onClearError={() => ws.clearError(id)}
                     onAnswerPermission={(requestId, decision) =>
                       ws.answerPermission(id, requestId, decision)
                     }
                     onAnswerQuestion={(requestId, answer) =>
                       ws.answerQuestion(id, requestId, answer)
+                    }
+                    onShowSidebar={
+                      sidebarCollapsed && paneIndex === 0 ? toggleSidebar : undefined
                     }
                   />
                 </Pane>

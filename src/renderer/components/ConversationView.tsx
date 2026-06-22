@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type DragEvent } from 'react'
-import type { AuthInfo, PermissionDecision, QuestionAnswer } from '../../shared/ipc'
+import type { AuthInfo, PermissionDecision, QuestionAnswer, SessionCard } from '../../shared/ipc'
 import type { UiImage } from '../../shared/schema'
 import type { SessionState } from '../state/sessionStore'
 import type { Tab } from '../state/workspaceStore'
@@ -40,6 +40,10 @@ interface Props {
   onClearError: () => void
   onAnswerPermission: (requestId: string, decision: PermissionDecision) => void
   onAnswerQuestion: (requestId: string, answer: QuestionAnswer) => void
+  /** Resume a prior conversation (clicked from the recent-conversations cards). */
+  onResumeConversation: (sessionId: string) => void
+  /** Present only on the leftmost pane while the sidebar is hidden — reveals it. */
+  onShowSidebar?: () => void
 }
 
 type Phase = 'centered' | 'docking' | 'docked'
@@ -68,7 +72,9 @@ export function ConversationView({
   onNewPane,
   onClearError,
   onAnswerPermission,
-  onAnswerQuestion
+  onAnswerQuestion,
+  onResumeConversation,
+  onShowSidebar
 }: Props) {
   const empty = session.items.length === 0
   const composerRef = useRef<ComposerHandle>(null)
@@ -122,32 +128,31 @@ export function ConversationView({
     setPhase(empty ? 'centered' : 'docked')
   }, [empty])
 
-  // Idea chips: the most recent prior conversations in this repo. Prefer the
-  // actual first prompt (a reusable "idea"), falling back to the summary.
-  const [ideas, setIdeas] = useState<string[]>([])
+  // Recent-conversation cards: the most recent prior conversations in this repo,
+  // each with an AI-generated title + description. Titles/descriptions are
+  // generated in the background by the main process; we render snippet
+  // fallbacks immediately and patch each card in place as its summary arrives
+  // over the onSessionSummaryUpdated push channel.
+  const [cards, setCards] = useState<SessionCard[]>([])
   useEffect(() => {
     if (!session.cwd) return
     let alive = true
     window.api
-      .listSessions(session.cwd, tab.provider)
+      .getSessionSummaries(session.cwd, tab.provider)
       .then((list) => {
-        if (!alive) return
-        const seen = new Set<string>()
-        const picks: string[] = []
-        for (const s of list) {
-          const text = (s.firstPrompt || s.summary || '').trim()
-          if (!text) continue
-          const key = text.toLowerCase()
-          if (seen.has(key)) continue
-          seen.add(key)
-          picks.push(text)
-          if (picks.length >= 5) break
-        }
-        setIdeas(picks)
+        if (alive) setCards(list)
       })
       .catch(() => undefined)
+    const unsubscribe = window.api.onSessionSummaryUpdated((update) => {
+      if (!alive) return
+      if (update.cwd !== session.cwd || update.provider !== tab.provider) return
+      setCards((prev) =>
+        prev.map((c) => (c.sessionId === update.card.sessionId ? update.card : c))
+      )
+    })
     return () => {
       alive = false
+      unsubscribe()
     }
   }, [session.cwd, tab.provider])
 
@@ -218,6 +223,7 @@ export function ConversationView({
         onClose={onClose}
         onClosePane={onClosePane}
         onNewPane={onNewPane}
+        onShowSidebar={onShowSidebar}
       />
 
       <div
@@ -265,7 +271,8 @@ export function ConversationView({
 
           {composer}
 
-          {/* Ideas — float below the composer, fade out on dock. */}
+          {/* Recent conversations — float below the composer, fade out on dock.
+              Each card resumes that conversation when clicked. */}
           {floating && (
             <div
               className={`absolute top-full inset-x-0 px-6 mt-5 transition-opacity duration-300 ${
@@ -273,20 +280,29 @@ export function ConversationView({
               }`}
             >
               <div className="max-w-3xl mx-auto">
-                {ideas.length > 0 && (
+                {cards.length > 0 && (
                   <>
                     <div className="text-[11px] uppercase tracking-wide text-ink-500 mb-2 text-center">
                       Pick up from a previous conversation
                     </div>
-                    <div className="flex flex-wrap justify-center gap-2">
-                      {ideas.map((idea, i) => (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {cards.map((card) => (
                         <button
-                          key={i}
-                          onClick={() => composerRef.current?.fill(idea)}
-                          title={idea}
-                          className="max-w-full text-left px-3 py-1.5 rounded-full border border-ink-700 bg-ink-850 text-[12px] text-ink-300 hover:border-accent/70 hover:text-ink-100 transition-colors"
+                          key={card.sessionId}
+                          onClick={() => onResumeConversation(card.sessionId)}
+                          title={card.description ?? card.title}
+                          className="group text-left px-3.5 py-2.5 rounded-xl border border-ink-700 bg-ink-850 hover:border-accent/70 hover:bg-ink-800 transition-colors"
                         >
-                          <span className="block truncate">{clamp(idea)}</span>
+                          <div className="text-[13px] font-medium text-ink-100 truncate group-hover:text-white">
+                            {clamp(card.title, 60)}
+                          </div>
+                          <div className="mt-0.5 text-[12px] text-ink-400 line-clamp-2 min-h-[2.25em]">
+                            {card.description ?? (
+                              <span className="italic text-ink-500">
+                                {card.pending ? 'Summarizing…' : 'No description'}
+                              </span>
+                            )}
+                          </div>
                         </button>
                       ))}
                     </div>

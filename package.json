@@ -1,9 +1,9 @@
 {
-  "name": "claude-workspace",
-  "productName": "Claude Workspace",
+  "name": "tesseract",
+  "productName": "Tesseract",
   "version": "0.1.0",
   "private": true,
-  "description": "Desktop workspace for Claude Code — agent output rendered as React DOM, never a terminal emulator.",
+  "description": "Tesseract — a desktop GUI for Claude Code; agent output rendered as React DOM, never a terminal emulator.",
   "main": "./out/main/index.js",
   "scripts": {
     "predev": "sh scripts/patch-dev-name.sh",

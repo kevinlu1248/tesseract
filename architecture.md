@@ -1,6 +1,6 @@
-# Claude Workspace — Architecture
+# Tesseract — Architecture
 
-A desktop workspace for running Claude Code where **agent output is rendered as
+A desktop app for running Claude Code where **agent output is rendered as
 HTML/React DOM, never a terminal emulator**. There is no xterm.js and no PTY in
 the display path. Structured agent events map to React components, and user
 input is a real DOM `<textarea>` (so `ctrl+A`, `option+arrow`, word-delete, etc.

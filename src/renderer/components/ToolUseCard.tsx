@@ -17,22 +17,19 @@ export function ToolUseCard({
   // newer ones — both render as the SubagentCard.
   if (block.name === 'Task' || block.name === 'Agent')
     return <SubagentCard block={block} result={result} />
-  // Edits show the diff while applying, then auto-collapse once done.
+  // Edits auto-expand to show the diff and stay open.
   if (block.name === 'Edit' || block.name === 'MultiEdit')
     return (
-      <ExpandableTool
-        block={block}
-        result={result}
-        body={<EditDiff block={block} />}
-        autoCollapse
-        scrollOnManualOpen
-      />
+      <ExpandableTool block={block} result={result} body={<EditDiff block={block} />} defaultOpen />
     )
   // Writes auto-expand to show the created file's contents.
   if (block.name === 'Write')
     return (
       <ExpandableTool block={block} result={result} body={<WriteContent block={block} />} defaultOpen />
     )
+  // Bash ("Ran") auto-expands to show its output.
+  if (block.name === 'Bash')
+    return <ExpandableTool block={block} result={result} defaultOpen />
   // Everything else expands to its result, exactly like Read.
   return <ExpandableTool block={block} result={result} />
 }
@@ -66,8 +63,7 @@ function ExpandableTool({
   result,
   body,
   defaultOpen = false,
-  autoCollapse = false,
-  scrollOnManualOpen = false
+  autoCollapse = false
 }: {
   block: UiToolUseBlock
   result?: UiToolResult
@@ -75,24 +71,15 @@ function ExpandableTool({
   defaultOpen?: boolean
   /** Open while the tool is still running, then collapse once it's done. */
   autoCollapse?: boolean
-  /** Bound the expansion with its own scrollbar only when the user opens it by
-   *  hand — avoids a scroll-within-scroll while it's auto-expanded. */
-  scrollOnManualOpen?: boolean
 }) {
   const [open, setOpen] = useState(autoCollapse ? !block.done : defaultOpen)
-  const [userOpened, setUserOpened] = useState(false)
   const wasDone = useRef(block.done)
   useEffect(() => {
     if (autoCollapse && block.done && !wasDone.current) setOpen(false)
     wasDone.current = block.done
   }, [autoCollapse, block.done])
-  const toggle = () => {
-    const next = !open
-    setOpen(next)
-    setUserOpened(next)
-  }
+  const toggle = () => setOpen(!open)
   const expanded = body ?? (result != null ? <ToolResultBody result={result} /> : null)
-  const scrollable = scrollOnManualOpen && userOpened
 
   if (expanded == null) {
     return (
@@ -111,7 +98,7 @@ function ExpandableTool({
         <ToolLine block={block} result={result} />
       </button>
       {open && (
-        <div className={`mt-1 mb-2 ml-3${scrollable ? ' max-h-80 overflow-y-auto' : ''}`}>
+        <div className="mt-1 mb-2 ml-3 max-h-80 overflow-y-auto">
           {expanded}
         </div>
       )}

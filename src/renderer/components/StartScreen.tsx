@@ -38,10 +38,10 @@ export function StartScreen({ onNew, onResume, onCancel, defaultCwd }: Props) {
         <div className="flex items-center gap-3 mb-2">
           <img
             src="/icon.svg"
-            alt="Claude Workspace"
+            alt="Tesseract"
             className="w-9 h-9 rounded-xl shadow-lg shadow-accent/10"
           />
-          <h1 className="text-xl font-semibold text-ink-100">Claude Workspace</h1>
+          <h1 className="text-xl font-semibold text-ink-100">Tesseract</h1>
           {onCancel && (
             <button
               onClick={onCancel}

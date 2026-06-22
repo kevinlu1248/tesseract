@@ -6,6 +6,7 @@ import {
   type BackendProvider,
   type ReviveSessionArgs,
   type SendArgs,
+  type SessionCardUpdate,
   type SessionEventEnvelope,
   type StartSessionArgs,
   type WorkspaceApi
@@ -25,6 +26,8 @@ const api: WorkspaceApi = {
     ipcRenderer.invoke(IPC.questionAnswer, args),
   listSessions: (cwd: string, provider?: BackendProvider) =>
     ipcRenderer.invoke(IPC.sessionList, cwd, provider),
+  getSessionSummaries: (cwd: string, provider?: BackendProvider) =>
+    ipcRenderer.invoke(IPC.sessionSummaries, cwd, provider),
   loadHistory: (args: { sessionId: string; cwd: string; provider?: BackendProvider }) =>
     ipcRenderer.invoke(IPC.sessionLoadHistory, args),
   generateTitle: (firstMessage: string) =>
@@ -35,6 +38,11 @@ const api: WorkspaceApi = {
     const listener = (_e: IpcRendererEvent, env: SessionEventEnvelope): void => cb(env)
     ipcRenderer.on(IPC.sessionEvent, listener)
     return () => ipcRenderer.removeListener(IPC.sessionEvent, listener)
+  },
+  onSessionSummaryUpdated: (cb: (update: SessionCardUpdate) => void) => {
+    const listener = (_e: IpcRendererEvent, update: SessionCardUpdate): void => cb(update)
+    ipcRenderer.on(IPC.sessionSummaryUpdated, listener)
+    return () => ipcRenderer.removeListener(IPC.sessionSummaryUpdated, listener)
   }
 }
 

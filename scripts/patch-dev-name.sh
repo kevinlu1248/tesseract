@@ -6,7 +6,7 @@
 # builds get the right name from package.json `productName` and don't need this.
 PLIST="node_modules/electron/dist/Electron.app/Contents/Info.plist"
 [ -f "$PLIST" ] || exit 0
-/usr/libexec/PlistBuddy -c "Set :CFBundleName Claude Workspace" "$PLIST" 2>/dev/null || true
-/usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Claude Workspace" "$PLIST" 2>/dev/null \
-  || /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string Claude Workspace" "$PLIST" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Set :CFBundleName Tesseract" "$PLIST" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Tesseract" "$PLIST" 2>/dev/null \
+  || /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string Tesseract" "$PLIST" 2>/dev/null || true
 exit 0

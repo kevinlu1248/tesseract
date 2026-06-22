@@ -152,7 +152,7 @@ export function useWorkspace() {
   const notify = useCallback((localId: string, title: string, preview: string) => {
     if (typeof Notification === 'undefined') return
     const show = (): void => {
-      const n = new Notification(title || 'Claude Workspace', {
+      const n = new Notification(title || 'Tesseract', {
         body: preview || 'Finished responding',
         // Re-use the per-session tag so a newer notification replaces an older
         // one for the same tab instead of stacking up.
