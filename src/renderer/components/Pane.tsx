@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import type { Side } from '../state/workspaceStore'
 
 /**
  * The drag payload used when a sidebar tab is dragged into the main area. The
@@ -14,7 +15,7 @@ interface Props {
   split: boolean
   onFocus: () => void
   /** Insert/move the dragged session next to this pane on the given side. */
-  onDropTab: (draggedId: string, side: 'left' | 'right') => void
+  onDropTab: (draggedId: string, side: Side) => void
   children: React.ReactNode
 }
 
@@ -24,15 +25,21 @@ function carriesTab(e: React.DragEvent): boolean {
 
 /**
  * A single split-pane cell. Wraps one ConversationView, marks itself focused on
- * pointer-down, and acts as a drop target: dragging a sidebar tab over its left
- * or right half shows a drop indicator and drops insert the session on that side.
+ * pointer-down, and acts as a drop target: dragging a sidebar tab toward any of
+ * its four edges shows a drop indicator and drops insert the session on that
+ * side — left/right tile side by side, top/bottom stack vertically.
  */
 export function Pane({ focused, split, onFocus, onDropTab, children }: Props) {
-  const [over, setOver] = useState<'left' | 'right' | null>(null)
+  const [over, setOver] = useState<Side | null>(null)
 
-  const sideFor = (e: React.DragEvent): 'left' | 'right' => {
+  // Pick the nearest edge: whichever of the four normalized distances is
+  // smallest decides the side, so the outer quarter of each edge drops there.
+  const sideFor = (e: React.DragEvent): Side => {
     const r = e.currentTarget.getBoundingClientRect()
-    return e.clientX < r.left + r.width / 2 ? 'left' : 'right'
+    const x = (e.clientX - r.left) / r.width
+    const y = (e.clientY - r.top) / r.height
+    const dist: Record<Side, number> = { left: x, right: 1 - x, top: y, bottom: 1 - y }
+    return (Object.keys(dist) as Side[]).reduce((a, b) => (dist[b] < dist[a] ? b : a), 'left')
   }
 
   return (
@@ -56,9 +63,7 @@ export function Pane({ focused, split, onFocus, onDropTab, children }: Props) {
         setOver(null)
         if (id) onDropTab(id, side)
       }}
-      className={`relative flex-1 min-w-0 flex flex-col overflow-hidden ${
-        split ? 'border-l border-ink-800 first:border-l-0' : ''
-      } ${
+      className={`relative flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden ${
         split
           ? focused
             ? 'z-10 ring-1 ring-inset ring-accent/50'
@@ -71,9 +76,15 @@ export function Pane({ focused, split, onFocus, onDropTab, children }: Props) {
       {/* Drop indicator: highlights the half where the session will be inserted. */}
       {over && (
         <div
-          className={`pointer-events-none absolute inset-y-0 w-1/2 bg-accent/10 ${
-            over === 'left' ? 'left-0 border-l-2' : 'right-0 border-r-2'
-          } border-accent`}
+          className={`pointer-events-none absolute bg-accent/10 border-accent ${
+            over === 'left'
+              ? 'inset-y-0 left-0 w-1/2 border-l-2'
+              : over === 'right'
+                ? 'inset-y-0 right-0 w-1/2 border-r-2'
+                : over === 'top'
+                  ? 'inset-x-0 top-0 h-1/2 border-t-2'
+                  : 'inset-x-0 bottom-0 h-1/2 border-b-2'
+          }`}
         />
       )}
     </div>

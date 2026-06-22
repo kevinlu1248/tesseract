@@ -57,7 +57,7 @@ export function MessageView({
 
   return (
     <div className="flex">
-      <div className="flex-1 min-w-0 space-y-2">
+      <div className="flex-1 min-w-0 space-y-1">
         {message.blocks.length === 0 && (
           <div className="text-ink-400 text-sm pulse">thinking…</div>
         )}

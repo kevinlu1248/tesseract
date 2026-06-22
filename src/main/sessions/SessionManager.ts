@@ -30,8 +30,6 @@ import { SummaryCache } from './summaryCache'
 
 /** How many recent conversations the new-message screen shows as cards. */
 const MAX_CARDS = 6
-/** Cap concurrent background summary generations to stay light on the model. */
-const SUMMARY_CONCURRENCY = 2
 
 /** Collapse a raw summary/prompt into a single-line snippet title fallback. */
 function snippet(s: SessionSummary, max = 60): string {
@@ -172,10 +170,61 @@ export class SessionManager {
   }
 
   /**
+   * Regenerate a live conversation's AI description from its latest state and
+   * cache it (keyed by SDK session id), so the "pick up where you left off"
+   * cards are already warm. Called on every task completion: the title is taken
+   * from the tab (kept stable across turns) and only the description is
+   * refreshed. The cache is tagged with the conversation's current lastModified
+   * so a later getSessionSummaries() lookup hits it instead of regenerating, and
+   * the result is broadcast so any open new-session screen patches live.
+   *
+   * Returns the stored {title, description}, or null if generation failed (the
+   * caller keeps whatever it had).
+   */
+  async summarizeSession(args: {
+    sessionId: string
+    cwd: string
+    provider?: BackendProvider
+    title: string
+    firstPrompt: string
+    latestState: string
+  }): Promise<{ title: string; description: string } | null> {
+    const provider = args.provider ?? 'claude'
+    const generated = await generateSummary(args.firstPrompt, args.latestState)
+    if (!generated) return null
+    // Keep the tab's existing title; only the description is regenerated. Fall
+    // back to the generated title if the tab never got a real one.
+    const title = args.title.trim() || generated.title
+    const description = generated.description
+    // Tag the cache entry with the conversation's current mtime so a later
+    // getSessionSummaries() considers it fresh (exact-match) and skips work.
+    const sessions = await this.listSessions(args.cwd, provider)
+    const match = sessions.find((s) => s.sessionId === args.sessionId)
+    const lastModified = match?.lastModified ?? Date.now()
+    await this.summaryCache.set(args.sessionId, { title, description, lastModified })
+    this.emitSummary?.({
+      cwd: args.cwd,
+      provider,
+      card: {
+        sessionId: args.sessionId,
+        title,
+        description,
+        lastModified,
+        firstPrompt: args.firstPrompt,
+        provider,
+        pending: false
+      }
+    })
+    return { title, description }
+  }
+
+  /**
    * Recent conversations as cards for the new-message screen. Returns
    * immediately with cached AI summaries where available and snippet fallbacks
-   * elsewhere; any card still missing its AI summary is generated in the
-   * background and pushed back via {@link emitSummary}.
+   * elsewhere. Cards missing their AI summary come back with `pending: true`;
+   * the renderer requests generation lazily (only for cards it actually shows)
+   * via {@link generateSessionSummary} rather than this method eagerly
+   * spending model calls on every recent conversation up front.
    */
   async getSessionSummaries(
     cwd: string,
@@ -183,7 +232,6 @@ export class SessionManager {
   ): Promise<SessionCard[]> {
     const summaries = (await this.listSessions(cwd, provider)).slice(0, MAX_CARDS)
     const cards: SessionCard[] = []
-    const pending: SessionSummary[] = []
     for (const s of summaries) {
       const cached = await this.summaryCache.getFresh(s.sessionId, s.lastModified)
       cards.push({
@@ -195,56 +243,68 @@ export class SessionManager {
         provider,
         pending: !cached
       })
-      if (!cached) pending.push(s)
     }
-    // Fire-and-forget: results stream back to the renderer as each completes.
-    void this.generateSummariesInBackground(cwd, provider, pending)
     return cards
   }
 
-  /** Generate the missing summaries with bounded concurrency; push each result. */
-  private async generateSummariesInBackground(
+  /**
+   * Lazily generate (or serve from cache) a single recent conversation's AI
+   * summary, on demand — the renderer calls this only for cards it actually
+   * displays. Returns the resolved card and broadcasts it via {@link emitSummary}
+   * so any open new-session screen patches in place. De-dupes concurrent
+   * requests for the same session id and returns null if the session is no
+   * longer listed.
+   */
+  async generateSessionSummary(
     cwd: string,
-    provider: BackendProvider,
-    summaries: SessionSummary[]
-  ): Promise<void> {
-    const queue = summaries.filter((s) => !this.generating.has(s.sessionId))
-    queue.forEach((s) => this.generating.add(s.sessionId))
+    provider: BackendProvider = 'claude',
+    sessionId: string
+  ): Promise<SessionCard | null> {
+    const summaries = await this.listSessions(cwd, provider)
+    const s = summaries.find((it) => it.sessionId === sessionId)
+    if (!s) return null
 
-    const worker = async (): Promise<void> => {
-      for (;;) {
-        const s = queue.shift()
-        if (!s) return
-        try {
-          const result = await generateSummary(s.firstPrompt ?? '', s.summary ?? '')
-          if (result) {
-            await this.summaryCache.set(s.sessionId, {
-              title: result.title,
-              description: result.description,
-              lastModified: s.lastModified
-            })
-          }
-          this.emitSummary?.({
-            cwd,
-            provider,
-            card: {
-              sessionId: s.sessionId,
-              title: result ? result.title : snippet(s),
-              description: result ? result.description : null,
-              lastModified: s.lastModified,
-              firstPrompt: s.firstPrompt,
-              provider,
-              pending: false
-            }
-          })
-        } finally {
-          this.generating.delete(s.sessionId)
-        }
+    // Serve a fresh cache hit without spending a model call.
+    const cached = await this.summaryCache.getFresh(s.sessionId, s.lastModified)
+    if (cached) {
+      return {
+        sessionId: s.sessionId,
+        title: cached.title,
+        description: cached.description,
+        lastModified: s.lastModified,
+        firstPrompt: s.firstPrompt,
+        provider,
+        pending: false
       }
     }
 
-    const workers = Array.from({ length: Math.min(SUMMARY_CONCURRENCY, queue.length) }, worker)
-    await Promise.all(workers)
+    // De-dupe: if a generation for this session is already in flight, skip —
+    // the in-flight one will broadcast the result to every listener.
+    if (this.generating.has(s.sessionId)) return null
+    this.generating.add(s.sessionId)
+    try {
+      const result = await generateSummary(s.firstPrompt ?? '', s.summary ?? '')
+      if (result) {
+        await this.summaryCache.set(s.sessionId, {
+          title: result.title,
+          description: result.description,
+          lastModified: s.lastModified
+        })
+      }
+      const card: SessionCard = {
+        sessionId: s.sessionId,
+        title: result ? result.title : snippet(s),
+        description: result ? result.description : null,
+        lastModified: s.lastModified,
+        firstPrompt: s.firstPrompt,
+        provider,
+        pending: false
+      }
+      this.emitSummary?.({ cwd, provider, card })
+      return card
+    } finally {
+      this.generating.delete(s.sessionId)
+    }
   }
 
   async loadHistory(args: {

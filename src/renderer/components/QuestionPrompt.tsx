@@ -67,13 +67,15 @@ export function QuestionPrompt({ request, onAnswer }: Props) {
         {request.questions.map((q, i) => {
           const draft = drafts[i]
           return (
-            <div key={i}>
-              <div className="flex items-baseline gap-2 mb-2">
-                {q.header && (
-                  <span className="shrink-0 text-[10px] uppercase tracking-wide font-mono px-1.5 py-0.5 rounded bg-ink-700 text-ink-300">
+            <div key={i} className="rounded-md border border-ink-700/60 bg-ink-900/40 px-3 py-2.5">
+              {q.header && (
+                <div className="-mx-3 -mt-2.5 mb-2 px-3 py-1.5 border-b border-ink-700/60 rounded-t-md bg-ink-800/50">
+                  <span className="text-[10px] uppercase tracking-wide font-mono font-semibold text-ink-300">
                     {q.header}
                   </span>
-                )}
+                </div>
+              )}
+              <div className="mb-2">
                 <span className="text-[13px] text-ink-100 font-medium">{q.question}</span>
               </div>
               {q.multiSelect && (

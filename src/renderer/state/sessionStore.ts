@@ -44,6 +44,8 @@ export type SessionAction =
   | { t: 'user'; id: string; text: string; images?: UiImage[] }
   | { t: 'load'; items: TranscriptItem[]; status: SessionStatus }
   | { t: 'clearError' }
+  /** Wipe the transcript back to a blank conversation, keeping cwd/model. */
+  | { t: 'clear' }
 
 function mapMessage(
   items: TranscriptItem[],
@@ -73,6 +75,85 @@ function mapBlock(
       }
     }
   })
+}
+
+/**
+ * Settle a turn that's ending or being superseded. An interrupted or
+ * superseded turn (the user sends a new message mid-stream, the interrupt
+ * button is hit, or the backend reports idle/interrupted/error) never delivers
+ * the trailing `block_stop` / `tool_result` events, so its tool and thinking
+ * blocks would keep their spinners forever. Mark every still-streaming block
+ * done, synthesize an "interrupted" result for any tool call that never got one
+ * (so the tool/subagent card stops spinning — covers nested subagent steps
+ * too), and drop assistant messages that never produced a block (their bare
+ * "thinking…" placeholder would otherwise linger). Returns the original array
+ * unchanged when there's nothing to settle, so the common (already-settled)
+ * path is identity-stable and doesn't churn React.
+ */
+function settleStreaming(items: TranscriptItem[]): TranscriptItem[] {
+  const haveResult = new Set<string>()
+  for (const it of items)
+    if (it.kind === 'tool_result' && it.result.toolUseId) haveResult.add(it.result.toolUseId)
+
+  const synthesized: TranscriptItem[] = []
+  let dirty = false
+
+  const settled = items
+    .filter((it) => {
+      const empty =
+        it.kind === 'message' &&
+        it.message.role === 'assistant' &&
+        it.message.blocks.length === 0
+      if (empty) dirty = true
+      return !empty
+    })
+    .map((it) => {
+      if (it.kind !== 'message') return it
+      let changed = false
+      const blocks = it.message.blocks.map((b) => {
+        let nb = b
+        if ((nb.kind === 'tool_use' || nb.kind === 'thinking') && !nb.done) {
+          nb = { ...nb, done: true }
+          changed = true
+        }
+        if (nb.kind === 'tool_use') {
+          if (nb.nested?.some((n) => !n.result)) {
+            nb = {
+              ...nb,
+              nested: nb.nested.map((n) =>
+                n.result
+                  ? n
+                  : {
+                      ...n,
+                      result: {
+                        toolUseId: n.toolUseId,
+                        text: 'Interrupted',
+                        isError: false,
+                        parentToolUseId: (nb as UiToolUseBlock).toolUseId
+                      }
+                    }
+              )
+            }
+            changed = true
+          }
+          const tuid = (nb as UiToolUseBlock).toolUseId
+          if (!haveResult.has(tuid)) {
+            haveResult.add(tuid)
+            synthesized.push({
+              kind: 'tool_result',
+              result: { toolUseId: tuid, text: 'Interrupted', isError: false }
+            })
+          }
+        }
+        return nb
+      })
+      if (!changed) return it
+      return { kind: 'message' as const, message: { ...it.message, blocks } }
+    })
+
+  if (synthesized.length) dirty = true
+  if (!dirty) return items
+  return [...settled, ...synthesized]
 }
 
 /** Map the (unique) tool_use block whose toolUseId matches — used to fold a
@@ -109,10 +190,12 @@ function applyCc(state: SessionState, e: CcEvent): SessionState {
       }
     case 'assistant_start': {
       const message: UiMessage = { id: e.messageId, role: 'assistant', blocks: [], ts: e.ts }
+      // A new turn supersedes any prior one — settle its dangling spinners
+      // before appending the fresh (empty) assistant message.
       return {
         ...state,
         currentAssistantId: e.messageId,
-        items: [...state.items, { kind: 'message', message }]
+        items: [...settleStreaming(state.items), { kind: 'message', message }]
       }
     }
     case 'block_start': {
@@ -221,6 +304,11 @@ export function sessionReducer(state: SessionState, action: SessionAction): Sess
   switch (action.t) {
     case 'clearError':
       return { ...state, error: undefined }
+    case 'clear':
+      // Drop the whole transcript (and any pending prompts / live-turn state)
+      // back to a blank, idle conversation. cwd/model are preserved so the
+      // status bar stays populated until the fresh session re-reports them.
+      return { ...initialSessionState, status: 'idle', cwd: state.cwd, model: state.model }
     case 'load':
       return { ...initialSessionState, items: action.items, status: action.status }
     case 'user': {
@@ -241,7 +329,10 @@ export function sessionReducer(state: SessionState, action: SessionAction): Sess
         // Optimistic: the turn is being established. The backend confirms with
         // 'connecting', then flips to 'running' once the model starts streaming.
         status: 'connecting',
-        items: [...state.items, { kind: 'message', message }]
+        // Sending a new message ends whatever turn was in flight — settle any
+        // spinners left behind by an interrupted/superseded turn so they don't
+        // keep spinning above the new message.
+        items: [...settleStreaming(state.items), { kind: 'message', message }]
       }
     }
     case 'event': {
@@ -249,8 +340,16 @@ export function sessionReducer(state: SessionState, action: SessionAction): Sess
       switch (e.kind) {
         case 'cc':
           return applyCc(state, e.event)
-        case 'status':
-          return { ...state, status: e.status }
+        case 'status': {
+          // When the turn is no longer actively streaming, settle any blocks
+          // the stream left mid-flight (an interrupt or error skips their
+          // trailing block_stop / tool_result events).
+          const settledStatuses: SessionStatus[] = ['idle', 'interrupted', 'error', 'exited']
+          const items = settledStatuses.includes(e.status)
+            ? settleStreaming(state.items)
+            : state.items
+          return { ...state, status: e.status, items }
+        }
         case 'error':
           return { ...state, error: { message: e.message, fatal: e.fatal } }
         case 'sdk_session':

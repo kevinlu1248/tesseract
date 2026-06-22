@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type DragEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react'
 import type { AuthInfo, PermissionDecision, QuestionAnswer, SessionCard } from '../../shared/ipc'
 import type { UiImage } from '../../shared/schema'
 import type { SessionState } from '../state/sessionStore'
@@ -6,6 +6,7 @@ import type { Tab } from '../state/workspaceStore'
 import { Composer, type ComposerHandle } from './Composer'
 import { PermissionPrompt } from './PermissionPrompt'
 import { QuestionPrompt } from './QuestionPrompt'
+import { RecentCard } from './RecentCard'
 import { StatusBar } from './StatusBar'
 import { Transcript } from './Transcript'
 
@@ -37,6 +38,8 @@ interface Props {
   onClosePane?: () => void
   /** Open a new session beside this pane as a split. */
   onNewPane?: () => void
+  /** Wipe this pane's conversation and start a fresh, blank one. */
+  onClear: () => void
   onClearError: () => void
   onAnswerPermission: (requestId: string, decision: PermissionDecision) => void
   onAnswerQuestion: (requestId: string, answer: QuestionAnswer) => void
@@ -70,6 +73,7 @@ export function ConversationView({
   onClose,
   onClosePane,
   onNewPane,
+  onClear,
   onClearError,
   onAnswerPermission,
   onAnswerQuestion,
@@ -134,18 +138,23 @@ export function ConversationView({
   // fallbacks immediately and patch each card in place as its summary arrives
   // over the onSessionSummaryUpdated push channel.
   const [cards, setCards] = useState<SessionCard[]>([])
+  // Key the fetch off `tab.cwd`, not `session.cwd`: the tab's cwd is known the
+  // moment the tab is created, whereas session.cwd is only populated once the
+  // backend streams its first event. A fresh, never-messaged session has no
+  // events yet, so session.cwd is undefined — and the recent-conversation cards
+  // (which only matter in that empty state) would never load.
   useEffect(() => {
-    if (!session.cwd) return
+    if (!tab.cwd) return
     let alive = true
     window.api
-      .getSessionSummaries(session.cwd, tab.provider)
+      .getSessionSummaries(tab.cwd, tab.provider)
       .then((list) => {
         if (alive) setCards(list)
       })
       .catch(() => undefined)
     const unsubscribe = window.api.onSessionSummaryUpdated((update) => {
       if (!alive) return
-      if (update.cwd !== session.cwd || update.provider !== tab.provider) return
+      if (update.cwd !== tab.cwd || update.provider !== tab.provider) return
       setCards((prev) =>
         prev.map((c) => (c.sessionId === update.card.sessionId ? update.card : c))
       )
@@ -154,7 +163,7 @@ export function ConversationView({
       alive = false
       unsubscribe()
     }
-  }, [session.cwd, tab.provider])
+  }, [tab.cwd, tab.provider])
 
   const centered = phase === 'centered'
   const floating = phase !== 'docked'
@@ -218,12 +227,16 @@ export function ConversationView({
         status={session.status}
         auth={auth}
         model={session.model}
-        cwd={session.cwd}
+        cwd={session.cwd ?? tab.cwd}
         contextTokens={session.contextTokens}
         onClose={onClose}
         onClosePane={onClosePane}
         onNewPane={onNewPane}
+        onClear={onClear}
         onShowSidebar={onShowSidebar}
+        // `onClosePane` is only supplied while split, so it doubles as the
+        // "this pane can be repositioned" signal.
+        reorderId={onClosePane ? tab.localId : undefined}
       />
 
       <div
@@ -248,9 +261,20 @@ export function ConversationView({
               ? `absolute inset-x-0 px-6 transition-all duration-500 ease-out ${
                   centered ? 'top-1/2 -translate-y-1/2' : 'top-full -translate-y-full'
                 }`
-              : ''
+              : 'relative'
           }
         >
+          {/* Soft fade above the docked composer so the scrolling transcript
+              melts into the input area instead of ending on a hard edge. Sits
+              just above the composer and is pointer-transparent so it never
+              intercepts clicks/scroll. */}
+          {!floating && (
+            <div
+              aria-hidden
+              className="pointer-events-none absolute bottom-full inset-x-0 h-16 bg-gradient-to-t from-ink-950 to-transparent"
+            />
+          )}
+
           {/* Greeting — floats above the composer, fades out on dock. */}
           {floating && (
             <div
@@ -260,7 +284,7 @@ export function ConversationView({
             >
               <div className="max-w-3xl mx-auto">
                 <h2 className="text-2xl font-semibold text-ink-100">
-                  What should we build{basename(session.cwd) ? ` in ${basename(session.cwd)}` : ''}?
+                  What should we build{basename(tab.cwd) ? ` in ${basename(tab.cwd)}` : ''}?
                 </h2>
                 <p className="mt-1.5 text-[13px] text-ink-400">
                   Describe a task, or pick up where you left off below.

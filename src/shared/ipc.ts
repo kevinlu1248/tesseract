@@ -13,6 +13,8 @@ export const IPC = {
   authGet: 'auth:get',
   dialogPickRepo: 'dialog:pick-repo',
   sessionStart: 'session:start',
+  /** Create a git worktree (new branch) from a workspace repo. */
+  worktreeCreate: 'worktree:create',
   sessionRevive: 'session:revive',
   sessionSend: 'session:send',
   sessionInterrupt: 'session:interrupt',
@@ -22,8 +24,12 @@ export const IPC = {
   sessionList: 'session:list',
   /** List recent conversations enriched with AI title + description (cards). */
   sessionSummaries: 'session:summaries',
+  /** Lazily generate (or serve cached) one recent conversation's AI summary. */
+  sessionGenerateSummary: 'session:generate-summary',
   sessionLoadHistory: 'session:load-history',
   sessionGenerateTitle: 'session:generate-title',
+  /** Regenerate + cache a live session's AI description (on task completion). */
+  sessionSummarize: 'session:summarize',
   /** main → renderer: a background-generated session card is ready. */
   sessionSummaryUpdated: 'session:summary-updated',
   /** Look up the most recently captured screenshot (for the "add to context" chip). */
@@ -122,6 +128,21 @@ export interface StartSessionArgs {
   yolo?: boolean
 }
 
+/** Ask the main process to spin a new git worktree off a workspace repo. */
+export interface CreateWorktreeArgs {
+  /** The workspace repo path the worktree is branched from. */
+  cwd: string
+  /** The user's task prompt — the new branch name is derived from this. */
+  prompt: string
+}
+
+export interface CreateWorktreeResult {
+  /** Absolute path of the new worktree directory (becomes the session cwd). */
+  path: string
+  /** The branch created and checked out in the worktree. */
+  branch: string
+}
+
 export interface ReviveSessionArgs {
   localId: string
   cwd: string
@@ -195,6 +216,25 @@ export interface SessionCard {
   pending: boolean
 }
 
+/**
+ * Ask the main process to (re)generate a live conversation's AI description and
+ * write it to the summary cache, so the "pick up where you left off" cards are
+ * already warm. Fired on each task completion. The title is taken from `title`
+ * (the tab's existing AI title) and kept stable; only the description is
+ * regenerated from the latest assistant output.
+ */
+export interface SummarizeSessionArgs {
+  sessionId: string
+  cwd: string
+  provider?: BackendProvider
+  /** The tab's current title — stored alongside the regenerated description. */
+  title: string
+  /** First user message — anchors what the conversation is about. */
+  firstPrompt: string
+  /** Latest assistant output — what was just accomplished. */
+  latestState: string
+}
+
 /** A background-completed card, pushed to the renderer to patch its list. */
 export interface SessionCardUpdate {
   /** The repo the card belongs to — the renderer ignores updates for other cwds. */
@@ -209,6 +249,8 @@ export interface WorkspaceApi {
   getAuth(): Promise<AuthInfo>
   pickRepo(): Promise<string | null>
   startSession(args: StartSessionArgs): Promise<{ localId: string }>
+  /** Create a git worktree (new branch) off a workspace repo; returns its path. */
+  createWorktree(args: CreateWorktreeArgs): Promise<CreateWorktreeResult>
   /** Resume a suspended tab's session under its existing localId (--resume). */
   reviveSession(args: ReviveSessionArgs): Promise<void>
   send(args: SendArgs): Promise<void>
@@ -220,10 +262,23 @@ export interface WorkspaceApi {
   /**
    * Recent conversations as cards (title + AI description) for the new-message
    * screen. Returns immediately with cached/fallback values; any card whose
-   * description is still pending is generated in the background, then delivered
-   * via onSessionSummaryUpdated.
+   * description is still pending must be generated lazily, on demand, via
+   * {@link generateSessionSummary}.
    */
   getSessionSummaries(cwd: string, provider?: BackendProvider): Promise<SessionCard[]>
+  /**
+   * Lazily generate (or serve from cache) a single recent conversation's AI
+   * summary — the renderer calls this only for cards it actually shows, so the
+   * model isn't spent up front on conversations the user never looks at. The
+   * resolved card is returned and also pushed via onSessionSummaryUpdated.
+   * Resolves to null if the session is gone or a generation is already in
+   * flight (the in-flight one broadcasts the result).
+   */
+  generateSessionSummary(
+    sessionId: string,
+    cwd: string,
+    provider?: BackendProvider
+  ): Promise<SessionCard | null>
   loadHistory(args: {
     sessionId: string
     cwd: string
@@ -231,6 +286,14 @@ export interface WorkspaceApi {
   }): Promise<TranscriptItem[]>
   /** Summarize the first user message into a short title; null on failure. */
   generateTitle(firstMessage: string): Promise<string | null>
+  /**
+   * Regenerate a live conversation's description and cache it (keyed by SDK
+   * session id) so the "pick up" cards render the up-to-date summary instantly.
+   * Returns the stored {title, description}, or null on failure.
+   */
+  summarizeSession(
+    args: SummarizeSessionArgs
+  ): Promise<{ title: string; description: string } | null>
   /**
    * Most recent screenshot captured within the last few minutes, or null if
    * none. Used to offer a one-click "add screenshot to context" chip.

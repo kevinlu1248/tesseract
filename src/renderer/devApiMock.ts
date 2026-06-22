@@ -22,6 +22,30 @@ function install(): void {
   const listeners = new Set<(e: SessionEventEnvelope) => void>()
   const summaryListeners = new Set<(u: SessionCardUpdate) => void>()
   const localId = 'mock-session'
+  // The question set shared by the AskUserQuestion tool_use block, the
+  // interactive picker, and the formatted answer fed back as the tool result.
+  const askQuestions = [
+    {
+      question: 'Which package manager should this project use?',
+      header: 'Pkg mgr',
+      multiSelect: false,
+      options: [
+        { label: 'npm', description: 'Ships with Node; simplest, widely supported.' },
+        { label: 'pnpm', description: 'Fast, disk-efficient via a content-addressable store.' },
+        { label: 'yarn', description: 'Mature alternative with workspaces support.' }
+      ]
+    },
+    {
+      question: 'Which checks should run in CI?',
+      header: 'CI checks',
+      multiSelect: true,
+      options: [
+        { label: 'Typecheck', description: 'Run tsc in strict mode.' },
+        { label: 'Lint', description: 'Run ESLint over the source.' },
+        { label: 'Tests', description: 'Run the unit test suite.' }
+      ]
+    }
+  ]
   const emit = (event: SessionEventEnvelope['event']): void =>
     listeners.forEach((cb) => cb({ localId, event }))
   const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
@@ -222,35 +246,34 @@ function install(): void {
       request: { requestId: 'perm-1', toolName: 'Bash', input: { command: 'ls -la' } }
     })
 
-    // Demonstrate the interactive AskUserQuestion picker alongside the prompt.
+    // The model also issues the AskUserQuestion tool call. Emit its tool_use
+    // block so the transcript shows a durable record of the question — mirroring
+    // the real backend, where the SDK streams this block before the picker is
+    // answered. The interactive picker (the `question` event below) is how the
+    // user actually answers it.
     emit({
-      kind: 'question',
-      request: {
-        requestId: 'q-1',
-        questions: [
-          {
-            question: 'Which package manager should this project use?',
-            header: 'Pkg mgr',
-            multiSelect: false,
-            options: [
-              { label: 'npm', description: 'Ships with Node; simplest, widely supported.' },
-              { label: 'pnpm', description: 'Fast, disk-efficient via a content-addressable store.' },
-              { label: 'yarn', description: 'Mature alternative with workspaces support.' }
-            ]
-          },
-          {
-            question: 'Which checks should run in CI?',
-            header: 'CI checks',
-            multiSelect: true,
-            options: [
-              { label: 'Typecheck', description: 'Run tsc in strict mode.' },
-              { label: 'Lint', description: 'Run ESLint over the source.' },
-              { label: 'Tests', description: 'Run the unit test suite.' }
-            ]
-          }
-        ]
+      kind: 'cc',
+      event: {
+        type: 'block_start',
+        messageId: m1,
+        blockId: 'b-ask',
+        kind: 'tool_use',
+        toolName: 'AskUserQuestion',
+        toolUseId: 'tool-q1'
       }
     })
+    emit({
+      kind: 'cc',
+      event: {
+        type: 'tool_input_delta',
+        blockId: 'b-ask',
+        partialJson: JSON.stringify({ questions: askQuestions })
+      }
+    })
+    emit({ kind: 'cc', event: { type: 'block_stop', blockId: 'b-ask' } })
+
+    // Demonstrate the interactive AskUserQuestion picker alongside the prompt.
+    emit({ kind: 'question', request: { requestId: 'q-1', questions: askQuestions } })
   }
 
   const api: WorkspaceApi = {
@@ -264,6 +287,10 @@ function install(): void {
       void runScript()
       return { localId }
     },
+    createWorktree: async (args) => ({
+      path: `${args.cwd}/.worktrees/mock-branch`,
+      branch: 'mock-branch'
+    }),
     reviveSession: async () => {
       emit({ kind: 'status', status: 'idle' })
     },
@@ -303,15 +330,37 @@ function install(): void {
     answerQuestion: async (args) => {
       emit({ kind: 'question_resolved', requestId: args.requestId })
       emit({ kind: 'status', status: 'running' })
+      // Mirror the real backend: the answer is delivered to the model by
+      // resolving the SDK permission as a deny, so the tool_result comes back
+      // flagged as an error with the user's picks as its text. The transcript
+      // card must render this as the answered question, NOT as "failed".
+      const lines = askQuestions.map((q, i) => {
+        const picks = args.answer.answers[i] ?? []
+        const chosen = picks.length ? picks.join(', ') : '(no answer)'
+        return `[${q.header}] ${q.question}\n→ ${chosen}`
+      })
+      emit({
+        kind: 'cc',
+        event: {
+          type: 'tool_result',
+          result: {
+            toolUseId: 'tool-q1',
+            isError: true,
+            text: `The user answered your question(s):\n\n${lines.join('\n\n')}\n\nProceed using the user's choices above.`
+          }
+        }
+      })
       emit({ kind: 'status', status: 'idle' })
     },
     listSessions: async () => [
       { sessionId: 's-1', summary: 'Refactor the auth module', lastModified: Date.now() - 3600_000, firstPrompt: 'Refactor auth' },
       { sessionId: 's-2', summary: 'Fix failing CI tests', lastModified: Date.now() - 86400_000 }
     ],
-    getSessionSummaries: async (cwd: string): Promise<SessionCard[]> => {
+    getSessionSummaries: async (): Promise<SessionCard[]> => {
       const provider = 'claude' as const
-      const raw: SessionCard[] = [
+      // Return pending cards only; generation happens lazily on demand via
+      // generateSessionSummary when the renderer actually shows a card.
+      return [
         {
           sessionId: 's-1',
           title: 'Refactor auth',
@@ -330,41 +379,52 @@ function install(): void {
           pending: true
         }
       ]
-      // Simulate background generation arriving a beat later.
-      void (async () => {
-        await wait(900)
-        summaryListeners.forEach((cb) =>
-          cb({
-            cwd,
-            provider,
-            card: {
-              ...raw[0],
-              title: 'Auth module refactor',
-              description: 'Restructured the auth module into smaller services and tightened token handling.',
-              pending: false
-            }
-          })
-        )
-        await wait(700)
-        summaryListeners.forEach((cb) =>
-          cb({
-            cwd,
-            provider,
-            card: {
-              ...raw[1],
-              title: 'Green up CI',
-              description: 'Diagnosed and fixed the flaky CI test suite so the pipeline passes reliably.',
-              pending: false
-            }
-          })
-        )
-      })()
-      return raw
+    },
+    generateSessionSummary: async (
+      sessionId: string,
+      cwd: string
+    ): Promise<SessionCard | null> => {
+      const provider = 'claude' as const
+      // Simulate the model call latency for the skeleton loading state.
+      await wait(900)
+      const lookup: Record<string, SessionCard> = {
+        's-1': {
+          sessionId: 's-1',
+          title: 'Auth module refactor',
+          description:
+            'Restructured the auth module into smaller services and tightened token handling.',
+          lastModified: Date.now() - 3600_000,
+          firstPrompt: 'Refactor the auth module',
+          provider,
+          pending: false
+        },
+        's-2': {
+          sessionId: 's-2',
+          title: 'Green up CI',
+          description:
+            'Diagnosed and fixed the flaky CI test suite so the pipeline passes reliably.',
+          lastModified: Date.now() - 86400_000,
+          provider,
+          pending: false
+        }
+      }
+      const card = lookup[sessionId]
+      if (!card) return null
+      summaryListeners.forEach((cb) => cb({ cwd, provider, card }))
+      return card
     },
     generateTitle: async (firstMessage: string): Promise<string | null> => {
       await wait(400)
       const words = firstMessage.trim().split(/\s+/).slice(0, 5).join(' ')
       return words ? `Mock: ${words}` : null
+    },
+    summarizeSession: async (args): Promise<{ title: string; description: string }> => {
+      await wait(400)
+      const words = args.firstPrompt.trim().split(/\s+/).slice(0, 5).join(' ')
+      return {
+        title: args.title || (words ? `Mock: ${words}` : 'Mock conversation'),
+        description: `Mock summary updated after a completed task (${args.latestState.length} chars of output).`
+      }
     },
     loadHistory: async (): Promise<TranscriptItem[]> => [
       {

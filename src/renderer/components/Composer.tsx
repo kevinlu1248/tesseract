@@ -42,6 +42,17 @@ function persistHandledShots(shots: Set<string>): void {
   }
 }
 
+// Adding or dismissing a screenshot in one pane must hide the suggestion in
+// every other pane too. localStorage `storage` events don't fire within the
+// same window, so we broadcast handling over a custom event that all live
+// Composers listen for. Each pane has its own `handledShots` ref + `recent`
+// state, so this keeps them in sync without lifting state up to a store.
+const SHOT_HANDLED_EVENT = 'cw.shotHandled'
+
+function broadcastShotHandled(path: string): void {
+  window.dispatchEvent(new CustomEvent<string>(SHOT_HANDLED_EVENT, { detail: path }))
+}
+
 /** Read an image File into the base64 UiImage shape the model expects. */
 function fileToImage(file: File): Promise<UiImage | null> {
   return new Promise((resolve) => {
@@ -82,12 +93,14 @@ function IconButton({
   disabled,
   title,
   variant,
+  className = '',
   children
 }: {
   onClick: () => void
   disabled?: boolean
   title: string
   variant: Variant
+  className?: string
   children: ReactNode
 }) {
   return (
@@ -96,7 +109,7 @@ function IconButton({
       disabled={disabled}
       title={title}
       aria-label={title}
-      className={`shrink-0 grid place-items-center w-8 h-8 rounded-lg transition-colors disabled:opacity-40 ${VARIANT[variant]}`}
+      className={`shrink-0 grid place-items-center w-8 h-8 rounded-lg transition-colors disabled:opacity-40 ${VARIANT[variant]} ${className}`}
     >
       {children}
     </button>
@@ -165,6 +178,71 @@ function StopIcon() {
       <rect x="2.5" y="2.5" width="9" height="9" rx="1.5" fill="currentColor" />
     </svg>
   )
+}
+
+function MicIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <rect x="6" y="2" width="4" height="7" rx="2" stroke="currentColor" strokeWidth="1.3" />
+      <path
+        d="M4 7.5a4 4 0 0 0 8 0M8 11.5V14M6 14h4"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+// ---- Minimal Web Speech API typings -------------------------------------
+// The DOM lib doesn't ship SpeechRecognition types, so we declare just the
+// slice we use. This is the browser-native engine: zero deps and real-time,
+// but note it relies on the host's speech backend (works in Chromium browsers;
+// may be unavailable in the packaged Electron build — the button hides itself
+// when the API isn't present).
+interface SpeechAlternative {
+  readonly transcript: string
+}
+interface SpeechResult {
+  readonly isFinal: boolean
+  readonly length: number
+  readonly [index: number]: SpeechAlternative
+}
+interface SpeechResultList {
+  readonly length: number
+  readonly [index: number]: SpeechResult
+}
+interface SpeechRecognitionEventLike {
+  readonly resultIndex: number
+  readonly results: SpeechResultList
+}
+interface SpeechRecognitionLike {
+  continuous: boolean
+  interimResults: boolean
+  lang: string
+  onresult: ((event: SpeechRecognitionEventLike) => void) | null
+  onend: (() => void) | null
+  onerror: ((event: { error?: string }) => void) | null
+  start: () => void
+  stop: () => void
+}
+type SpeechRecognitionCtor = new () => SpeechRecognitionLike
+
+function getSpeechRecognitionCtor(): SpeechRecognitionCtor | null {
+  if (typeof window === 'undefined') return null
+  const w = window as unknown as {
+    SpeechRecognition?: SpeechRecognitionCtor
+    webkitSpeechRecognition?: SpeechRecognitionCtor
+  }
+  return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null
+}
+
+/** Append dictated text to an existing draft, inserting a separating space. */
+function appendSpeech(base: string, add: string): string {
+  const next = add.replace(/^\s+/, '')
+  if (!base) return next
+  return /\s$/.test(base) ? base + next : `${base} ${next}`
 }
 
 /** Idle-state label shown on the left of the composer status bar. */
@@ -254,9 +332,13 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
   const [images, setImages] = useState<UiImage[]>(initialImages ?? [])
   const [dragging, setDragging] = useState(false)
   const [recent, setRecent] = useState<RecentScreenshot | null>(null)
+  const [listening, setListening] = useState(false)
   const agentName = provider === 'codex' ? 'Codex' : 'Claude Code'
   const ref = useRef<HTMLTextAreaElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null)
+  // Resolve the native speech engine once; the mic button is hidden if absent.
+  const speechSupported = useRef<boolean>(getSpeechRecognitionCtor() !== null).current
   // Paths the user has already added or dismissed — never re-suggest them.
   // Seeded from localStorage so dismissals survive remounts and restarts.
   const handledShots = useRef<Set<string>>(null as unknown as Set<string>)
@@ -286,11 +368,25 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
     }
   }, [])
 
+  // When any pane adds or dismisses a screenshot, drop it here too so the
+  // suggestion disappears everywhere at once — not just in the acting pane.
+  useEffect(() => {
+    const onHandled = (e: Event): void => {
+      const path = (e as CustomEvent<string>).detail
+      if (typeof path !== 'string') return
+      handledShots.current.add(path)
+      setRecent((prev) => (prev?.path === path ? null : prev))
+    }
+    window.addEventListener(SHOT_HANDLED_EVENT, onHandled)
+    return () => window.removeEventListener(SHOT_HANDLED_EVENT, onHandled)
+  }, [])
+
   const addRecentScreenshot = (): void => {
     if (!recent) return
     setImages((prev) => [...prev, recent.image])
     handledShots.current.add(recent.path)
     persistHandledShots(handledShots.current)
+    broadcastShotHandled(recent.path)
     setRecent(null)
     ref.current?.focus()
   }
@@ -299,6 +395,7 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
     if (recent) {
       handledShots.current.add(recent.path)
       persistHandledShots(handledShots.current)
+      broadcastShotHandled(recent.path)
     }
     setRecent(null)
   }
@@ -332,6 +429,14 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
     const el = ref.current
     if (!el) return
     el.style.height = 'auto'
+    // An empty field is exactly one row at height:auto. Skip the scrollHeight
+    // measurement in that case — right after a programmatic clear (send,
+    // dictation, draft reset) it can read a stale multi-line height that then
+    // sticks, and a wrapped placeholder inflates it too. Either way the empty
+    // composer renders as a tall box with the placeholder pinned to the top.
+    // Reading el.value (not the `text` closure) keeps this correct from the
+    // onChange path, where state hasn't committed yet.
+    if (el.value === '') return
     el.style.height = `${Math.min(el.scrollHeight, 220)}px`
   }
 
@@ -346,6 +451,16 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
     requestAnimationFrame(resize)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Re-measure on EVERY text change — including programmatic clears (submit,
+  // dictation, draft restore). onChange-only resizing leaves the imperative
+  // height stuck tall if the field is emptied through any other path, which
+  // renders an empty composer as a ~170px box with the placeholder pinned to
+  // the top. Keying off `text` makes the height always match the content.
+  useEffect(() => {
+    resize()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [text])
 
   // Mirror the live draft up to the workspace store on every change so it
   // survives the remount that happens when this tab is switched away and back.
@@ -376,9 +491,71 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
     []
   )
 
+  // Stop any in-flight recognition when the component unmounts (e.g. tab switch)
+  // so the mic isn't left hot in the background.
+  useEffect(() => {
+    return () => {
+      recognitionRef.current?.stop()
+      recognitionRef.current = null
+    }
+  }, [])
+
+  // Toggle browser-native speech-to-text. Dictated words are appended to the
+  // current draft live; interim (not-yet-final) words are shown too and get
+  // replaced as the engine settles on the final transcription.
+  const toggleDictation = (): void => {
+    if (listening) {
+      recognitionRef.current?.stop()
+      return
+    }
+    const Ctor = getSpeechRecognitionCtor()
+    if (!Ctor) return
+
+    const rec = new Ctor()
+    rec.continuous = true
+    rec.interimResults = true
+    rec.lang = navigator.language || 'en-US'
+
+    // Text committed before/while dictating. Finalized chunks fold into this;
+    // interim chunks render on top of it without being permanently kept.
+    let committed = text
+
+    rec.onresult = (event): void => {
+      let interim = ''
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result = event.results[i]
+        const phrase = result[0]?.transcript ?? ''
+        if (result.isFinal) committed = appendSpeech(committed, phrase)
+        else interim += phrase
+      }
+      const draft = interim ? appendSpeech(committed, interim) : committed
+      setText(draft)
+      requestAnimationFrame(resize)
+    }
+    rec.onerror = (): void => {
+      setListening(false)
+      recognitionRef.current = null
+    }
+    rec.onend = (): void => {
+      setListening(false)
+      recognitionRef.current = null
+      ref.current?.focus()
+    }
+
+    recognitionRef.current = rec
+    try {
+      rec.start()
+      setListening(true)
+    } catch {
+      // start() throws if a prior session is still tearing down; ignore.
+      recognitionRef.current = null
+    }
+  }
+
   const submit = (): void => {
     const value = text.trim()
     if (!value && images.length === 0) return
+    recognitionRef.current?.stop()
     onSend(value, images)
     setText('')
     setImages([])
@@ -408,7 +585,7 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
       className={
         centered
           ? 'no-drag'
-          : 'bg-ink-900/80 px-6 py-3 no-drag'
+          : 'px-6 py-3 no-drag'
       }
     >
       <div className="max-w-3xl mx-auto">
@@ -556,6 +733,16 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
             >
               <AttachIcon />
             </IconButton>
+            {speechSupported && (
+              <IconButton
+                onClick={toggleDictation}
+                title={listening ? 'Stop dictation' : 'Dictate (voice to text)'}
+                variant={listening ? 'danger' : 'secondary'}
+                className={listening ? 'animate-pulse !bg-red-600/80 text-ink-50' : ''}
+              >
+                <MicIcon />
+              </IconButton>
+            )}
             <textarea
               ref={ref}
               value={text}

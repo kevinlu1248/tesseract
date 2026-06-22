@@ -3,16 +3,19 @@ import type {
   PermissionDecision,
   QuestionAnswer,
   SessionEventEnvelope,
+  SessionStatus,
   StartSessionArgs,
   TranscriptItem,
   BackendProvider
 } from '../../shared/ipc'
 import type { UiImage } from '../../shared/schema'
 import { StreamSmoother } from './streamSmoother'
-import { isBusy } from './workspaceStore'
+import { isBusy, paneIds } from './workspaceStore'
 import {
   initialWorkspaceState,
   workspaceReducer,
+  type PaneNode,
+  type Side,
   type WorkspaceState
 } from './workspaceStore'
 
@@ -26,6 +29,14 @@ const TABS_KEY = 'cw.tabs.v2'
 
 /** localStorage key for the set of hidden workspaces (by cwd). */
 const HIDDEN_KEY = 'cw.hidden.v1'
+
+/**
+ * localStorage key for the pane layout tree (and which pane was focused) so a
+ * restart restores the split arrangement, not just a single pane. Leaves are
+ * keyed by `localId`, which we persist per tab and reuse on restore so the tree
+ * lines up with the restored tabs.
+ */
+const PANES_KEY = 'cw.panes.v1'
 
 /** A session idle and off-screen this long gets its subprocess reaped. */
 const REAP_IDLE_MS = 5 * 60 * 1000
@@ -64,13 +75,56 @@ function lastMessagePreview(items: TranscriptItem[] | undefined): string {
   return oneLine.length > 140 ? `${oneLine.slice(0, 139)}…` : oneLine
 }
 
+/** The full text of the first user message in a transcript ('' if none). */
+function firstUserText(items: TranscriptItem[] | undefined): string {
+  if (!items) return ''
+  for (const it of items) {
+    if (it.kind !== 'message' || it.message.role !== 'user') continue
+    const text = it.message.blocks
+      .filter((b) => b.kind === 'text')
+      .map((b) => (b as { text: string }).text)
+      .join(' ')
+      .trim()
+    if (text) return text
+  }
+  return ''
+}
+
+/** The full text of the most recent assistant message ('' if none). */
+function lastAssistantText(items: TranscriptItem[] | undefined): string {
+  if (!items) return ''
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i]
+    if (it.kind !== 'message' || it.message.role !== 'assistant') continue
+    const text = it.message.blocks
+      .filter((b) => b.kind === 'text')
+      .map((b) => (b as { text: string }).text)
+      .join(' ')
+      .trim()
+    if (text) return text
+  }
+  return ''
+}
+
 interface PersistedTab {
+  /**
+   * The tab's localId, persisted (and reused on restore) so the saved pane tree
+   * — whose leaves are localIds — lines up with the restored tabs. Optional for
+   * backward compat with lists written before this was added.
+   */
+  localId?: string
   cwd: string
   provider?: BackendProvider
   title: string
   /** Resume id; absent for a tab opened but never messaged (restored fresh). */
   sdkSessionId?: string
   archived: boolean
+}
+
+/** The persisted main-area layout: the pane tree plus the focused pane. */
+interface PersistedLayout {
+  panes: PaneNode | null
+  activeId: string | null
 }
 
 function basename(p: string): string {
@@ -112,6 +166,17 @@ export function useWorkspace() {
       savedHiddenOnce.current = []
     }
   }
+  // The pane layout (split tree + focused pane) from the last session, applied
+  // once after the tabs are restored. `undefined` means "not yet read".
+  const savedPanesOnce = useRef<PersistedLayout | null | undefined>(undefined)
+  if (savedPanesOnce.current === undefined) {
+    try {
+      const raw = localStorage.getItem(PANES_KEY)
+      savedPanesOnce.current = raw ? (JSON.parse(raw) as PersistedLayout) : null
+    } catch {
+      savedPanesOnce.current = null
+    }
+  }
   // `started` guards the one-time restore pass; `ready` gates persistence so we
   // never overwrite the saved tab list until restore has FULLY completed.
   // (Flipping a single flag synchronously at restore-start let a mid-restore
@@ -126,6 +191,9 @@ export function useWorkspace() {
   const earlyBuffer = useRef<SessionEventEnvelope[]>([])
   // localId → epoch ms when it most recently became idle (for the reaper).
   const idleSince = useRef<Map<string, number>>(new Map())
+  // localId → the status we last observed, so we can detect a busy→idle edge
+  // (a completed task) and refresh that conversation's cached AI description.
+  const lastSummaryStatus = useRef<Map<string, SessionStatus>>(new Map())
 
   const ensureSmoother = useCallback((localId: string): StreamSmoother => {
     let sm = smoothers.current.get(localId)
@@ -226,7 +294,9 @@ export function useWorkspace() {
       /** True when `title` is already a real title (restored tab) — don't auto-title. */
       titled?: boolean,
       /** Open beside the focused pane as a split, instead of replacing it. */
-      split?: boolean
+      split?: boolean,
+      /** Send this as the session's first message right after it opens. */
+      initialPrompt?: string
     ) => {
       // Default to yolo unless the caller explicitly opts out.
       const { localId } = await window.api.startSession({ yolo: true, ...args })
@@ -257,6 +327,14 @@ export function useWorkspace() {
       const mine = earlyBuffer.current.filter((e) => e.localId === localId)
       earlyBuffer.current = earlyBuffer.current.filter((e) => e.localId !== localId)
       for (const env of mine) sm.push(env.event)
+      // Auto-send the seed prompt (e.g. a freshly created worktree). The tab's
+      // 'user' action lands right after openTab, and the backend MessageQueue
+      // buffers the send until the subprocess materializes — no stateRef race.
+      if (initialPrompt) {
+        const id = `u-${(userSeq += 1)}`
+        dispatch({ t: 'session', localId, action: { t: 'user', id, text: initialPrompt } })
+        void window.api.send({ localId, text: initialPrompt })
+      }
       return localId
     },
     [ensureSmoother]
@@ -278,6 +356,7 @@ export function useWorkspace() {
         // they have a resumable session.
         if (!sid && t.archived) return null
         return {
+          localId: t.localId,
           cwd: t.cwd,
           provider: t.provider,
           title: t.title,
@@ -286,9 +365,11 @@ export function useWorkspace() {
         }
       })
       .filter((t): t is PersistedTab => t !== null)
+    const layout: PersistedLayout = { panes: s.panes, activeId: s.activeId }
     try {
       localStorage.setItem(TABS_KEY, JSON.stringify(tabs))
       localStorage.setItem(HIDDEN_KEY, JSON.stringify(s.hiddenWorkspaces))
+      localStorage.setItem(PANES_KEY, JSON.stringify(layout))
     } catch {
       /* storage full / unavailable — ignore */
     }
@@ -310,6 +391,9 @@ export function useWorkspace() {
     if (started.current) return
     started.current = true
     const saved = savedOnce.current ?? []
+    // Track which tabs actually came back so the saved layout can be pruned to
+    // them (a tab that failed to restore must not leave a dangling pane).
+    const restoredIds = new Set<string>()
     void (async () => {
       try {
         for (const t of saved) {
@@ -329,7 +413,9 @@ export function useWorkspace() {
                   })
                   .catch(() => [] as TranscriptItem[])
               : []
-            const localId = newLocalId()
+            // Reuse the persisted localId so the saved pane tree (keyed by
+            // localId) lines up; fall back to a fresh id for older saved lists.
+            const localId = t.localId ?? newLocalId()
             dispatch({
               t: 'openTab',
               localId,
@@ -342,10 +428,23 @@ export function useWorkspace() {
               titled: true,
               sdkSessionId: t.sdkSessionId
             })
+            restoredIds.add(localId)
             if (t.archived) dispatch({ t: 'archive', localId })
           } catch {
             /* one tab failing to restore must not lose the others */
           }
+        }
+        // Re-apply the saved split layout (pruned to tabs that came back). Each
+        // openTab above reset panes to a single leaf, so this restores the tree.
+        // Done before hideWorkspace so hiding can drop hidden panes from it.
+        const layout = savedPanesOnce.current
+        if (layout?.panes) {
+          dispatch({
+            t: 'restorePanes',
+            panes: layout.panes,
+            activeId: layout.activeId,
+            keep: restoredIds
+          })
         }
         // Re-hide the workspaces that were hidden last time. Their tabs were
         // restored above (suspended); hiding only drops them from the visible
@@ -413,6 +512,41 @@ export function useWorkspace() {
     }
   }, [state])
 
+  // Keep each conversation's cached AI description current: on every busy→idle
+  // edge (a completed task), regenerate the description from the latest
+  // assistant output and re-cache it (keyed by SDK session id) so the "pick up
+  // where you left off" cards are already warm — no on-open "Summarizing…". The
+  // title is left to the first-message auto-title path; only the description is
+  // refreshed here. Best-effort: a failed call leaves the prior summary intact.
+  useEffect(() => {
+    for (const tab of state.tabs) {
+      const sess = state.sessions[tab.localId]
+      if (!sess) continue
+      const prev = lastSummaryStatus.current.get(tab.localId)
+      lastSummaryStatus.current.set(tab.localId, sess.status)
+      // Only a real turn finishing (was busy, now idle) should re-summarize —
+      // not a fresh open, a revive, or a load that lands on idle directly.
+      if (sess.status !== 'idle' || !prev || !isBusy(prev)) continue
+      const sessionId = sess.sdkSessionId ?? tab.sdkSessionId
+      if (!sessionId) continue
+      const firstPrompt = firstUserText(sess.items)
+      const latestState = lastAssistantText(sess.items)
+      if (!firstPrompt && !latestState) continue
+      void window.api
+        .summarizeSession({
+          sessionId,
+          cwd: tab.cwd,
+          provider: tab.provider,
+          title: tab.title,
+          firstPrompt,
+          latestState
+        })
+        .catch(() => {
+          /* summarizing is best-effort — keep the previous description */
+        })
+    }
+  }, [state])
+
   // Reaper: every 30s, suspend any live session that's been idle and off-screen
   // (not in a visible pane) for too long — freeing its subprocess.
   useEffect(() => {
@@ -420,7 +554,7 @@ export function useWorkspace() {
       const now = Date.now()
       const s = stateRef.current
       for (const tab of s.tabs) {
-        if (tab.suspended || s.panes.includes(tab.localId)) continue
+        if (tab.suspended || paneIds(s.panes).includes(tab.localId)) continue
         const since = idleSince.current.get(tab.localId)
         if (since && now - since > REAP_IDLE_MS) suspend(tab.localId)
       }
@@ -528,7 +662,7 @@ export function useWorkspace() {
     [revive]
   )
   const splitPane = useCallback(
-    (localId: string, anchorId: string, side: 'left' | 'right') => {
+    (localId: string, anchorId: string, side: Side) => {
       const tab = stateRef.current.tabs.find((t) => t.localId === localId)
       dispatch({ t: 'splitPane', localId, anchorId, side })
       if (tab?.suspended) void revive(localId)
@@ -536,6 +670,12 @@ export function useWorkspace() {
     [revive]
   )
   const closePane = useCallback((localId: string) => dispatch({ t: 'closePane', localId }), [])
+  // Persist a dragged pane divider's new child sizes (path = child indices from
+  // the pane-tree root to the split being resized).
+  const resizePane = useCallback(
+    (path: number[], sizes: number[]) => dispatch({ t: 'resizePane', path, sizes }),
+    []
+  )
   // Archiving a tab also reaps its backend — archived sessions don't need a
   // live subprocess; they resume on demand if reopened.
   const archive = useCallback(
@@ -575,6 +715,26 @@ export function useWorkspace() {
     },
     [begin, setActive]
   )
+  // Spin a git worktree (new branch) off a workspace repo, then open a fresh
+  // session in it seeded with the task prompt. The worktree dir becomes the new
+  // session's cwd, so it surfaces as its own workspace group in the sidebar.
+  const createWorktree = useCallback(
+    async (cwd: string, prompt: string, provider: BackendProvider = 'claude') => {
+      const value = prompt.trim()
+      if (!value) return
+      const result = await window.api.createWorktree({ cwd, prompt: value })
+      await begin(
+        { cwd: result.path, provider, yolo: true },
+        undefined,
+        snippet(value), // title from the prompt …
+        true, // … and mark it titled so the seed message doesn't re-snippet it
+        false,
+        value // seed the worktree session with the prompt
+      )
+    },
+    [begin]
+  )
+
   const unqueue = useCallback(
     (localId: string, index: number) => dispatch({ t: 'unqueue', localId, index }),
     []
@@ -629,6 +789,18 @@ export function useWorkspace() {
     []
   )
 
+  // Replace a pane's conversation with a blank one. Reap the live subprocess and
+  // forget the SDK session id so nothing resumes the old thread, then wipe the
+  // transcript. The tab is left suspended-and-idle (see the clearSession action);
+  // the next message revives a fresh session via the normal lazy-revive path.
+  const clearSession = useCallback((localId: string) => {
+    smoothers.current.get(localId)?.reset()
+    smoothers.current.delete(localId)
+    idleSince.current.delete(localId)
+    void window.api.closeSession(localId)
+    dispatch({ t: 'clearSession', localId })
+  }, [])
+
   const active = useMemo(() => {
     if (!state.activeId) return null
     const tab = state.tabs.find((t) => t.localId === state.activeId) ?? null
@@ -646,16 +818,19 @@ export function useWorkspace() {
     setActive,
     splitPane,
     closePane,
+    resizePane,
     archive,
     unarchive,
     hideWorkspace,
     openWorkspace,
+    createWorktree,
     closeTab,
     deleteTab,
     unqueue,
     setDraft,
     answerPermission,
     answerQuestion,
-    clearError
+    clearError,
+    clearSession
   }
 }
