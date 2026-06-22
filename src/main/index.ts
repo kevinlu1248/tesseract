@@ -3,6 +3,12 @@ import { join } from 'node:path'
 import { app, BrowserWindow, nativeImage, shell } from 'electron'
 import { registerIpc } from './ipc'
 
+// Set the app name as early as possible (before `ready` / any menu is built) so
+// the macOS menu bar, About/Hide/Quit items, and notifications read "Claude
+// Workspace" instead of "Electron" (the dev binary's bundle name) or the bare
+// package name. Packaged builds also pick up `productName` from package.json.
+app.setName('Claude Workspace')
+
 let mainWindow: BrowserWindow | null = null
 
 /** App icon shipped at <root>/build/icon.png (empty image if missing — never throws). */
