@@ -21,7 +21,7 @@ Make sure the `claude` CLI is logged in first (`claude` in a terminal, sign in
 with your subscription). To use the Codex backend, log in with `codex login`.
 See [Requirements](#requirements).
 
-## What works today
+## Features
 
 - Open a repo, start a Claude Code or Codex session, send a prompt from a DOM
   textarea.
