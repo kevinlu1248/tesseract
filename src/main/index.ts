@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process'
 import { join } from 'node:path'
 import { app, BrowserWindow, nativeImage, shell } from 'electron'
+import { IPC } from '../shared/ipc'
 import { registerIpc } from './ipc'
 
 // Set the app name as early as possible (before `ready` / any menu is built) so
@@ -55,6 +56,18 @@ function createWindow(): void {
   })
 
   mainWindow.on('ready-to-show', () => mainWindow?.show())
+
+  // ⌘W / Ctrl+W must close the focused pane (or the tab, if it's the last one)
+  // — not the window. The default menu's "Close Window" accelerator handles
+  // ⌘W natively and would quit before any renderer keydown fires, so cancel it
+  // here and forward the intent to the renderer, which owns the pane/tab logic.
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown' || input.shift || input.alt) return
+    if ((input.meta || input.control) && input.key.toLowerCase() === 'w') {
+      event.preventDefault()
+      mainWindow?.webContents.send(IPC.menuClosePane)
+    }
+  })
 
   // Open external links in the user's browser, never in-app.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {

@@ -17,6 +17,12 @@ export const IPC = {
   worktreeCreate: 'worktree:create',
   sessionRevive: 'session:revive',
   sessionSend: 'session:send',
+  /**
+   * Rewind the conversation to just before a chosen earlier user message by
+   * forking the SDK session at that point. Returns the forked session id (or
+   * null when rewinding past the first message — i.e. start fresh).
+   */
+  sessionRewind: 'session:rewind',
   sessionInterrupt: 'session:interrupt',
   sessionClose: 'session:close',
   permissionAnswer: 'permission:answer',
@@ -36,11 +42,25 @@ export const IPC = {
   screenshotRecent: 'screenshot:recent',
   /** Bring the app window to the foreground (e.g. from a notification click). */
   windowFocus: 'window:focus',
+  /** renderer → main: post an OS notification for a finished background turn. */
+  notifyShow: 'notify:show',
+  /** main → renderer: the user clicked a notification — open that tab. */
+  notifyClicked: 'notify:clicked',
   /** Relaunch the whole app — tears down every session, then restarts the process. */
   appRestart: 'app:restart',
+  /** main → renderer: ⌘W pressed — close the focused pane/tab, not the window. */
+  menuClosePane: 'menu:close-pane',
   /** main → renderer push channel */
   sessionEvent: 'session:event'
 } as const
+
+/** Payload for an OS notification posted when a background turn finishes. */
+export interface NotifyArgs {
+  /** Tab to open when the notification is clicked. */
+  localId: string
+  title: string
+  body: string
+}
 
 /* ──────────────────────────────── Auth ──────────────────────────────── */
 
@@ -104,6 +124,14 @@ export type SessionOutboundEvent =
   | { kind: 'status'; status: SessionStatus }
   | { kind: 'error'; message: string; fatal: boolean }
   | { kind: 'sdk_session'; sdkSessionId: string }
+  /**
+   * A resume did NOT carry the prior conversation forward: the SDK reported a
+   * session id different from the one we asked it to resume. A successful resume
+   * keeps the same id (forkSession is off), so a different id means the SDK
+   * silently started a FRESH, context-less session. The renderer warns the user
+   * and re-feeds the displayed transcript so the next turn has context again.
+   */
+  | { kind: 'resume_failed'; requestedSessionId: string; newSessionId: string }
   | { kind: 'permission'; request: PermissionRequest }
   | { kind: 'permission_resolved'; requestId: string }
   | { kind: 'question'; request: QuestionRequest }
@@ -165,6 +193,31 @@ export interface SendArgs {
   text: string
   /** Images attached to this message (base64), sent to the model alongside text. */
   images?: UiImage[]
+}
+
+/**
+ * Rewind a conversation by forking its SDK session up to just before the chosen
+ * user message — the renderer identifies that message by its ordinal among the
+ * transcript's user messages (0-based, from the start), which is stable across
+ * the live `u-N` ids and the persisted SDK uuids. The edited message itself is
+ * sent separately as the new turn once the fork resolves.
+ */
+export interface RewindArgs {
+  /** The SDK session id to fork from. */
+  sessionId: string
+  cwd: string
+  provider?: BackendProvider
+  /** 0-based ordinal of the target among genuine user messages in the session. */
+  userOrdinal: number
+}
+
+export interface RewindResult {
+  /**
+   * The forked session id to resume, or null when the rewind target is the very
+   * first user message (nothing precedes it — the caller starts a fresh session
+   * and the edited message becomes its first turn).
+   */
+  sessionId: string | null
 }
 
 export interface AnswerPermissionArgs {
@@ -256,6 +309,13 @@ export interface WorkspaceApi {
   /** Resume a suspended tab's session under its existing localId (--resume). */
   reviveSession(args: ReviveSessionArgs): Promise<void>
   send(args: SendArgs): Promise<void>
+  /**
+   * Fork the SDK session up to just before a chosen earlier user message,
+   * returning the forked session id to resume (or null to start fresh). The
+   * renderer then rebases the tab onto that session and re-sends the edited
+   * message as the new turn.
+   */
+  rewind(args: RewindArgs): Promise<RewindResult>
   interrupt(localId: string): Promise<void>
   closeSession(localId: string): Promise<void>
   answerPermission(args: AnswerPermissionArgs): Promise<void>
@@ -303,8 +363,18 @@ export interface WorkspaceApi {
   getRecentScreenshot(): Promise<RecentScreenshot | null>
   /** Bring the app window to the foreground (used by notification clicks). */
   focusWindow(): Promise<void>
+  /**
+   * Post an OS notification for a turn that finished in the background. Created
+   * in the main process so its click handler can't be dropped by renderer GC
+   * (which would otherwise leave the OS to fall back to its default activation).
+   */
+  showNotification(args: NotifyArgs): void
+  /** Subscribe to notification clicks; the arg is the localId of the tab to open. */
+  onNotificationClicked(cb: (localId: string) => void): () => void
   /** Restart the entire app (main + renderer): closes all sessions, then relaunches. */
   restartApp(): Promise<void>
+  /** Subscribe to ⌘W presses (forwarded from main); returns an unsubscribe fn. */
+  onClosePaneRequest(cb: () => void): () => void
   /** Subscribe to streamed session events; returns an unsubscribe fn. */
   onSessionEvent(cb: (env: SessionEventEnvelope) => void): () => void
   /** Subscribe to background-completed session cards; returns an unsubscribe fn. */

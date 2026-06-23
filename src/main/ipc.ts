@@ -9,6 +9,7 @@ import {
   type CreateWorktreeArgs,
   type NotifyArgs,
   type ReviveSessionArgs,
+  type RewindArgs,
   type SendArgs,
   type SessionCardUpdate,
   type SessionEventEnvelope,
@@ -63,6 +64,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): SessionManag
   ipcMain.handle(IPC.worktreeCreate, (_e, args: CreateWorktreeArgs) => createWorktree(args))
   ipcMain.handle(IPC.sessionRevive, (_e, args: ReviveSessionArgs) => manager.revive(args))
   ipcMain.handle(IPC.sessionSend, (_e, args: SendArgs) => manager.send(args))
+  ipcMain.handle(IPC.sessionRewind, (_e, args: RewindArgs) => manager.rewindFork(args))
   ipcMain.handle(IPC.sessionInterrupt, (_e, localId: string) => manager.interrupt(localId))
   ipcMain.handle(IPC.sessionClose, (_e, localId: string) => manager.close(localId))
   ipcMain.handle(IPC.permissionAnswer, (_e, args: AnswerPermissionArgs) =>

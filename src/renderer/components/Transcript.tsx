@@ -1,5 +1,5 @@
-import { useLayoutEffect, useRef } from 'react'
-import type { TranscriptItem, UiToolResult } from '../../shared/schema'
+import { useCallback, useLayoutEffect, useRef } from 'react'
+import type { TranscriptItem, UiImage, UiToolResult } from '../../shared/schema'
 import { MessageView } from './MessageView'
 import { ToolResultCard } from './ToolResultCard'
 
@@ -8,8 +8,31 @@ import { ToolResultCard } from './ToolResultCard'
 // yank them back down.
 const STICK_THRESHOLD = 120
 
-export function Transcript({ items }: { items: TranscriptItem[] }) {
+// How close to the true bottom counts as "all the way down" for hiding the
+// fade-out gradient above the composer. Tighter than STICK_THRESHOLD so the
+// fade only disappears once there's genuinely nothing left to scroll into.
+const BOTTOM_EPSILON = 8
+
+export function Transcript({
+  items,
+  onAtBottomChange,
+  onEditMessage,
+}: {
+  items: TranscriptItem[]
+  onAtBottomChange?: (atBottom: boolean) => void
+  /** Edit an earlier user message, rewinding the conversation to that point. */
+  onEditMessage?: (messageId: string, text: string, images: UiImage[]) => void
+}) {
   const scroller = useRef<HTMLDivElement>(null)
+
+  // Report whether the scroller is parked at (or within a hair of) the bottom,
+  // so the parent can hide the soft fade when there's nothing more below.
+  const reportAtBottom = useCallback(() => {
+    const el = scroller.current
+    if (!el) return
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+    onAtBottomChange?.(distanceFromBottom <= BOTTOM_EPSILON)
+  }, [onAtBottomChange])
   // The scroller's content height as of the previous commit. Comparing the
   // *live* scrollTop against the *old* height tells us whether the user was
   // near the bottom before the new content arrived — without depending on
@@ -45,17 +68,27 @@ export function Transcript({ items }: { items: TranscriptItem[] }) {
     const distanceFromOldBottom = prevHeight.current - el.scrollTop - el.clientHeight
     if (distanceFromOldBottom < STICK_THRESHOLD) el.scrollTop = el.scrollHeight
     prevHeight.current = el.scrollHeight
-  }, [items])
+    reportAtBottom()
+  }, [items, reportAtBottom])
 
   return (
     <div
       ref={scroller}
-      className="flex-1 overflow-y-auto px-6 py-6"
+      onScroll={reportAtBottom}
+      // Marks the transcript content region so the selection popover only offers
+      // "Talk about this" for text selected here (not the composer/status bar).
+      data-transcript-root
+      className="flex-1 overflow-y-auto px-6 pt-6 pb-20"
     >
       <div className="max-w-3xl mx-auto space-y-5">
         {items.map((item, i) =>
           item.kind === 'message' ? (
-            <MessageView key={item.message.id} message={item.message} results={resultByToolUse} />
+            <MessageView
+              key={item.message.id}
+              message={item.message}
+              results={resultByToolUse}
+              onEdit={onEditMessage}
+            />
           ) : foldedToolUseIds.has(item.result.toolUseId) ? null : (
             <ToolResultCard key={`tr-${i}`} result={item.result} />
           )

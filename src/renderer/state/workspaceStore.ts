@@ -161,6 +161,8 @@ export type WorkspaceAction =
       titled?: boolean
       /** Open beside the focused pane as a split, rather than replacing it. */
       split?: boolean
+      /** Which side of the focused pane to open on when `split` is set (default 'right'). */
+      side?: Side
       /** Open without a live backend (restored/reaped) — resumes on first use. */
       suspended?: boolean
     }
@@ -206,6 +208,13 @@ export type WorkspaceAction =
    * send/focus revives it fresh (no --resume).
    */
   | { t: 'clearSession'; localId: string }
+  /**
+   * Rewind a tab to before the user message at `itemIndex`: truncate its
+   * transcript and rebase the tab onto a forked (or fresh, when undefined) SDK
+   * session, marked suspended so the next send revives it. The edited message
+   * is re-sent separately as the new turn (see useWorkspace.editAndRewind).
+   */
+  | { t: 'rewindTo'; localId: string; itemIndex: number; sdkSessionId?: string }
   | { t: 'session'; localId: string; action: SessionAction }
 
 function patchTab(state: WorkspaceState, localId: string, fn: (t: Tab) => Tab): Tab[] {
@@ -385,13 +394,13 @@ export function workspaceReducer(
         seq
       }
       // A freshly opened session takes over the main area as a single pane —
-      // unless `split` is set, in which case it opens just to the right of the
-      // focused pane, growing the split.
+      // unless `split` is set, in which case it opens beside the focused pane
+      // (on `side`, default 'right'), growing the split.
       let panes: PaneNode | null
       if (action.split && state.panes) {
         const anchor = fixActive(state.panes, state.activeId)
         panes = anchor
-          ? insertBeside(state.panes, anchor, action.localId, 'right')
+          ? insertBeside(state.panes, anchor, action.localId, action.side ?? 'right')
           : leaf(action.localId)
       } else {
         panes = leaf(action.localId)
@@ -666,6 +675,28 @@ export function workspaceReducer(
         sessions: {
           ...state.sessions,
           [action.localId]: sessionReducer(sess, { t: 'clear' })
+        }
+      }
+    }
+
+    case 'rewindTo': {
+      const sess = state.sessions[action.localId]
+      if (!sess) return state
+      return {
+        ...state,
+        // Rebase the tab onto the forked/fresh session id and suspend it so the
+        // follow-up send revives that session (not the one we just branched off).
+        // Drop any queued input — it belonged to the now-discarded tail.
+        tabs: patchTab(state, action.localId, (t) => ({
+          ...t,
+          sdkSessionId: action.sdkSessionId,
+          suspended: true,
+          unread: false,
+          queued: []
+        })),
+        sessions: {
+          ...state.sessions,
+          [action.localId]: sessionReducer(sess, { t: 'rewind', index: action.itemIndex })
         }
       }
     }

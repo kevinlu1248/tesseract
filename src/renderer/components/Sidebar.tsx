@@ -284,13 +284,6 @@ export function Sidebar({
       >
         <img src="/icon.svg" alt="Tesseract" className="w-5 h-5 rounded-md shrink-0" />
         <button
-          onClick={onToggleCollapse}
-          title="Collapse sidebar (⌘B)"
-          className="no-drag text-ink-400 hover:text-ink-100 px-1.5 py-1 rounded-lg hover:bg-ink-800 text-[15px] leading-none transition-colors"
-        >
-          «
-        </button>
-        <button
           onClick={() => {
             // Both dev and packaged now do a full rebuild + relaunch (dev spawns
             // a fresh `npm run dev`), which closes every running session.
@@ -308,6 +301,13 @@ export function Sidebar({
           className="no-drag ml-1.5 px-2.5 py-1 rounded-lg bg-ink-700 hover:bg-ink-600 text-ink-100 text-[12px] font-semibold transition-colors"
         >
           +
+        </button>
+        <button
+          onClick={onToggleCollapse}
+          title="Collapse sidebar (⌘B)"
+          className="no-drag ml-1.5 text-ink-400 hover:text-ink-100 px-1.5 py-1 rounded-lg hover:bg-ink-800 text-[15px] leading-none transition-colors"
+        >
+          «
         </button>
       </div>
 

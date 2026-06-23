@@ -302,6 +302,7 @@ function install(): void {
       emit({ kind: 'cc', event: { type: 'result' } })
       emit({ kind: 'status', status: 'idle' })
     },
+    rewind: async () => ({ sessionId: null }),
     interrupt: async () => emit({ kind: 'status', status: 'interrupted' }),
     closeSession: async () => undefined,
     answerPermission: async (args: AnswerPermissionArgs) => {
@@ -450,6 +451,11 @@ function install(): void {
     focusWindow: async (): Promise<void> => {
       window.focus()
     },
+    showNotification: () => {
+      // No OS notifications in the browser preview.
+    },
+    onNotificationClicked: () => () => undefined,
+    onClosePaneRequest: () => () => undefined,
     restartApp: async (): Promise<void> => {
       // No Electron process to relaunch in the browser preview — reload the page.
       window.location.reload()

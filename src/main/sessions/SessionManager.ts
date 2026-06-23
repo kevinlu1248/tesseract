@@ -37,6 +37,24 @@ function snippet(s: SessionSummary, max = 60): string {
   return text.length > max ? `${text.slice(0, max)}…` : text
 }
 
+/**
+ * Whether a persisted `user`-type message is genuine user prose (renders as a
+ * user bubble) rather than a synthetic tool-result message. Mirrors the
+ * user-bubble criterion in historyToItems(): a non-empty string content, or a
+ * content array carrying at least one text/image/thinking block (tool_result-
+ * only messages don't count). Keeps rewind's user-ordinal aligned with the
+ * transcript the renderer shows.
+ */
+function isUserProse(m: PersistedMessage): boolean {
+  const content = (m.message as { content?: unknown } | null)?.content
+  if (typeof content === 'string') return content.trim().length > 0
+  if (!Array.isArray(content)) return false
+  return content.some((b) => {
+    const type = (b as { type?: string })?.type
+    return type === 'text' || type === 'image' || type === 'thinking'
+  })
+}
+
 interface SessionRecord {
   localId: string
   adapter: BackendAdapter
@@ -305,6 +323,52 @@ export class SessionManager {
     } finally {
       this.generating.delete(s.sessionId)
     }
+  }
+
+  /**
+   * Fork a session's transcript up to just before a chosen earlier user
+   * message, so the conversation can be rewound and re-run from that point. The
+   * target is identified by its ordinal among genuine user messages (0-based) —
+   * stable across the renderer's live `u-N` ids and the persisted SDK uuids,
+   * since both produce exactly one user bubble per genuine user turn, in order.
+   *
+   * The SDK's `forkSession({ upToMessageId })` slices the transcript inclusive
+   * of `upToMessageId`, so we fork up to the message immediately *preceding* the
+   * target user message — leaving the prior turns intact as context. Returns the
+   * new forked session id (resumable via `--resume`), or null when the target is
+   * the first user message (nothing precedes it → start a fresh conversation).
+   *
+   * Codex sessions have no fork primitive, so they always rewind to fresh.
+   */
+  async rewindFork(args: {
+    sessionId: string
+    cwd: string
+    provider?: BackendProvider
+    userOrdinal: number
+  }): Promise<{ sessionId: string | null }> {
+    // Editing the first message restarts the conversation; nothing to fork.
+    if (args.userOrdinal <= 0 || args.provider === 'codex') return { sessionId: null }
+    const sdk = await loadSdk()
+    const messages = (await sdk.getSessionMessages(args.sessionId, {
+      dir: args.cwd,
+      includeSystemMessages: false
+    })) as unknown as PersistedMessage[]
+    // Indices (into the full ordered list) of genuine user-prose messages — the
+    // ones that render as user bubbles. Tool-result "user" messages and subagent
+    // (parent_tool_use_id) turns are excluded, matching historyToItems().
+    const userIndices: number[] = []
+    messages.forEach((m, i) => {
+      if (m.type === 'user' && !m.parent_tool_use_id && isUserProse(m)) userIndices.push(i)
+    })
+    const target = userIndices[args.userOrdinal]
+    // Target missing, or nothing precedes it → start fresh.
+    if (target === undefined || target <= 0) return { sessionId: null }
+    const upToMessageId = messages[target - 1].uuid
+    const { sessionId } = await sdk.forkSession(args.sessionId, {
+      dir: args.cwd,
+      upToMessageId
+    })
+    return { sessionId }
   }
 
   async loadHistory(args: {

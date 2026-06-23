@@ -76,6 +76,12 @@ export interface ComposerHandle {
   /** Replace the draft text, resize, and focus the textarea. */
   fill: (text: string) => void
   focus: () => void
+  /**
+   * Prepend the given text as a markdown blockquote (the "Talk about this"
+   * action on a transcript selection), then focus the textarea so the user can
+   * type their question right after the quote.
+   */
+  quote: (text: string) => void
   /** Attach image files (e.g. from a window-wide drop) to the draft. */
   addImages: (files: FileList | File[]) => void
 }
@@ -481,6 +487,29 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
         el.focus()
         // Wait for the controlled value to render before measuring scrollHeight.
         requestAnimationFrame(resize)
+      },
+      quote: (value: string) => {
+        // Render the selection as a markdown blockquote and leave a blank line
+        // below for the user's prompt. Prepend it (with a separating gap) to
+        // whatever draft is already there so multiple quotes can stack.
+        const block = value
+          .replace(/\r\n?/g, '\n')
+          .split('\n')
+          .map((line) => `> ${line}`)
+          .join('\n')
+        setText((prev) => {
+          const quoted = `${block}\n\n`
+          return prev.trim() ? `${quoted}${prev}` : quoted
+        })
+        const el = ref.current
+        if (!el) return
+        el.focus()
+        requestAnimationFrame(() => {
+          resize()
+          // Drop the caret at the very end so typing continues after the quote.
+          const len = el.value.length
+          el.setSelectionRange(len, len)
+        })
       },
       focus: () => ref.current?.focus(),
       addImages: (files: FileList | File[]) => {

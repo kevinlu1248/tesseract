@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { AuthInfo, BackendProvider, SessionStatus } from '../shared/ipc'
+import { CommandPalette, type Command } from './components/CommandPalette'
 import { ConversationView } from './components/ConversationView'
 import { Pane } from './components/Pane'
 import { PaneTree } from './components/PaneTree'
@@ -10,10 +11,10 @@ import { paneIds, pruneTree } from './state/workspaceStore'
 
 export function App() {
   const [auth, setAuth] = useState<AuthInfo | null>(null)
-  // Showing the repo picker to open an additional tab (vs. the active session).
-  const [picking, setPicking] = useState(false)
+  // Command palette overlay (⌘K / ⌘⇧P).
+  const [paletteOpen, setPaletteOpen] = useState(false)
   const ws = useWorkspace()
-  const { state } = ws
+  const { state, restoring } = ws
 
   // The layout tree to render, pruned to leaves whose tab+session still exist —
   // so a closed/deleted session never leaves a blank pane. Splits collapse
@@ -78,21 +79,26 @@ export function App() {
     window.addEventListener('mouseup', onUp)
   }, [])
 
-  // Opening a workspace re-opens all of its previous non-archived sessions
+  // Opening a workspace surfaces all of its recent conversations as lazy tabs
   // (and starts a fresh one if it has none) — see useWorkspace.openWorkspace.
   const startNew = useCallback(
     (cwd: string, yolo: boolean, provider: BackendProvider) => {
-      setPicking(false)
-      ws.openWorkspace(cwd, yolo, provider)
+      void ws.openWorkspace(cwd, yolo, provider)
     },
     [ws]
   )
+
+  // Pick a repo folder and open it directly — no prompt. The workspace's recent
+  // conversations are surfaced automatically by openWorkspace.
+  const pickAndOpen = useCallback(async () => {
+    const dir = await window.api.pickRepo()
+    if (dir) void ws.openWorkspace(dir)
+  }, [ws])
 
   // New chat in an already-open workspace: skip the picker entirely and begin
   // immediately in that cwd (yolo on by default, matching ws.begin).
   const startNewInWorkspace = useCallback(
     (cwd: string, provider: BackendProvider = 'claude') => {
-      setPicking(false)
       void ws.begin({ cwd, provider, yolo: true })
     },
     [ws]
@@ -114,7 +120,6 @@ export function App() {
 
   const resume = useCallback(
     async (cwd: string, sessionId: string, yolo: boolean, provider: BackendProvider) => {
-      setPicking(false)
       const items = await window.api
         .loadHistory({ sessionId, cwd, provider })
         .catch(() => [])
@@ -124,15 +129,26 @@ export function App() {
   )
 
   // Esc interrupts the focused session.
-  // Cmd/Ctrl+T opens a new chat in the active session's workspace.
+  // Cmd/Ctrl+T opens a new pane in the active session's workspace.
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
+      // ⌘K or ⌘⇧P toggles the command palette.
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        ((e.key === 'k' || e.key === 'K') || (e.shiftKey && (e.key === 'p' || e.key === 'P')))
+      ) {
+        e.preventDefault()
+        setPaletteOpen((v) => !v)
+        return
+      }
+      // While the palette is open it owns the keyboard (Esc/↑/↓/Enter).
+      if (paletteOpen) return
       if (e.key === 'Escape' && state.activeId) ws.interrupt(state.activeId)
       if ((e.metaKey || e.ctrlKey) && (e.key === 't' || e.key === 'T')) {
         const tab = state.tabs.find((t) => t.localId === state.activeId)
         if (tab) {
           e.preventDefault()
-          startNewInWorkspace(tab.cwd, tab.provider)
+          ws.newPane(tab.cwd, tab.provider)
         }
       }
       if ((e.metaKey || e.ctrlKey) && (e.key === 'b' || e.key === 'B')) {
@@ -142,9 +158,170 @@ export function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [state.activeId, state.tabs, ws, startNewInWorkspace, toggleSidebar])
+  }, [state.activeId, state.tabs, ws, toggleSidebar, paletteOpen])
 
-  // No sessions yet → full-screen launcher.
+  // ⌘W closes the focused pane; when it's the last remaining one, closes the
+  // tab instead — never the whole app. The native window-close shortcut is
+  // intercepted in the main process (it would otherwise quit before any
+  // renderer keydown fires) and forwarded here as a request.
+  useEffect(() => {
+    return window.api.onClosePaneRequest(() => {
+      if (!state.activeId) return
+      if (multiPane) ws.closePane(state.activeId)
+      else ws.closeTab(state.activeId)
+    })
+  }, [state.activeId, multiPane, ws])
+
+  // Commands surfaced in the ⌘K / ⌘⇧P palette. Built from the active tab and
+  // the list of open sessions; entries disable themselves when not applicable.
+  const commands = useMemo<Command[]>(() => {
+    const activeTab = state.tabs.find((t) => t.localId === state.activeId)
+    const hasActive = Boolean(activeTab && state.activeId)
+    const list: Command[] = [
+      {
+        id: 'new-chat',
+        title: 'New Chat in Workspace',
+        subtitle: activeTab?.cwd,
+        group: 'General',
+        keywords: 'create session tab pane',
+        shortcut: '⌘T',
+        enabled: hasActive,
+        run: () => activeTab && ws.newPane(activeTab.cwd, activeTab.provider)
+      },
+      {
+        id: 'add-pane-right',
+        title: 'Add Pane Right',
+        subtitle: activeTab?.cwd,
+        group: 'Panes',
+        keywords: 'split new session beside east horizontal',
+        enabled: hasActive,
+        run: () => activeTab && ws.newPane(activeTab.cwd, activeTab.provider, 'right')
+      },
+      {
+        id: 'add-pane-left',
+        title: 'Add Pane Left',
+        subtitle: activeTab?.cwd,
+        group: 'Panes',
+        keywords: 'split new session beside west horizontal',
+        enabled: hasActive,
+        run: () => activeTab && ws.newPane(activeTab.cwd, activeTab.provider, 'left')
+      },
+      {
+        id: 'add-pane-down',
+        title: 'Add Pane Down',
+        subtitle: activeTab?.cwd,
+        group: 'Panes',
+        keywords: 'split new session below bottom vertical stack',
+        enabled: hasActive,
+        run: () => activeTab && ws.newPane(activeTab.cwd, activeTab.provider, 'bottom')
+      },
+      {
+        id: 'add-pane-up',
+        title: 'Add Pane Up',
+        subtitle: activeTab?.cwd,
+        group: 'Panes',
+        keywords: 'split new session above top vertical stack',
+        enabled: hasActive,
+        run: () => activeTab && ws.newPane(activeTab.cwd, activeTab.provider, 'top')
+      },
+      {
+        id: 'open-workspace',
+        title: 'Open Workspace…',
+        group: 'General',
+        keywords: 'pick repo folder directory new project',
+        run: () => void pickAndOpen()
+      },
+      {
+        id: 'create-worktree',
+        title: 'Create Git Worktree…',
+        subtitle: activeTab?.cwd,
+        group: 'General',
+        keywords: 'branch git parallel',
+        enabled: hasActive,
+        run: () => {
+          if (!activeTab) return
+          const prompt = window.prompt('Task for the new worktree session:')
+          if (prompt && prompt.trim()) {
+            void createWorktree(activeTab.cwd, prompt.trim(), activeTab.provider)
+          }
+        }
+      },
+      {
+        id: 'toggle-sidebar',
+        title: sidebarCollapsed ? 'Show Sidebar' : 'Hide Sidebar',
+        group: 'General',
+        keywords: 'collapse expand panel',
+        shortcut: '⌘B',
+        run: toggleSidebar
+      },
+      {
+        id: 'interrupt',
+        title: 'Interrupt Session',
+        group: 'Session',
+        keywords: 'stop cancel escape abort',
+        shortcut: '⎋',
+        enabled: hasActive,
+        run: () => state.activeId && ws.interrupt(state.activeId)
+      },
+      {
+        id: 'clear-session',
+        title: 'Clear Session',
+        group: 'Session',
+        keywords: 'reset wipe transcript fresh new',
+        enabled: hasActive,
+        run: () => state.activeId && ws.clearSession(state.activeId)
+      },
+      {
+        id: 'archive-tab',
+        title: 'Archive Tab',
+        group: 'Session',
+        keywords: 'hide tuck',
+        enabled: hasActive,
+        run: () => state.activeId && ws.archive(state.activeId)
+      },
+      {
+        id: 'close-tab',
+        title: 'Close Tab',
+        group: 'Session',
+        keywords: 'remove quit',
+        enabled: hasActive,
+        run: () => state.activeId && ws.closeTab(state.activeId)
+      },
+      {
+        id: 'restart-app',
+        title: 'Restart App',
+        group: 'App',
+        keywords: 'reload relaunch',
+        run: () => window.api.restartApp()
+      }
+    ]
+    // One "Switch to…" entry per non-archived tab that isn't already active.
+    for (const t of state.tabs) {
+      if (t.archived || t.localId === state.activeId) continue
+      list.push({
+        id: `switch-${t.localId}`,
+        title: `Switch to: ${t.title}`,
+        subtitle: t.cwd,
+        group: 'Switch to session',
+        keywords: 'tab session focus go to',
+        run: () => ws.setActive(t.localId)
+      })
+    }
+    return list
+  }, [state.tabs, state.activeId, ws, sidebarCollapsed, toggleSidebar, createWorktree, pickAndOpen])
+
+  // Startup restore is still bringing saved tabs back — show a quiet loading
+  // state rather than flashing the launcher (which would look like a "new /
+  // resume session" prompt on every restart).
+  if (restoring && state.tabs.length === 0) {
+    return (
+      <div className="h-full grid place-items-center text-ink-500 text-sm">
+        Restoring your workspace…
+      </div>
+    )
+  }
+
+  // No sessions to restore → full-screen launcher.
   if (state.tabs.length === 0) {
     return <StartScreen onNew={startNew} onResume={resume} />
   }
@@ -154,6 +331,11 @@ export function App() {
 
   return (
     <div className="h-full flex">
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        commands={commands}
+      />
       <Sidebar
         tabs={state.tabs}
         statuses={statuses}
@@ -162,7 +344,7 @@ export function App() {
         onUnarchive={ws.unarchive}
         onClose={ws.closeTab}
         onDelete={ws.deleteTab}
-        onNew={() => setPicking(true)}
+        onNew={() => void pickAndOpen()}
         onRestart={() => window.api.restartApp()}
         onNewInWorkspace={startNewInWorkspace}
         onCreateWorktree={createWorktree}
@@ -184,9 +366,7 @@ export function App() {
       )}
 
       <div className="flex-1 min-w-0 flex flex-col">
-        {picking ? (
-          <StartScreen onNew={startNew} onResume={resume} onCancel={() => setPicking(false)} />
-        ) : liveTree ? (
+        {liveTree ? (
           <div className="flex-1 min-h-0 flex">
             <PaneTree
               node={liveTree}
@@ -210,6 +390,9 @@ export function App() {
                       session={session}
                       tab={tab}
                       onSend={(text, images) => ws.send(id, text, images)}
+                      onEditMessage={(messageId, text, images) =>
+                        void ws.editAndRewind(id, messageId, text, images)
+                      }
                       onDraftChange={(text, images) => ws.setDraft(id, text, images)}
                       onInterrupt={() => ws.interrupt(id)}
                       onUnqueue={(index) => ws.unqueue(id, index)}
@@ -221,6 +404,7 @@ export function App() {
                         resume(tab.cwd, sessionId, true, tab.provider)
                       }
                       onClearError={() => ws.clearError(id)}
+                      onDismissContextLost={() => ws.dismissContextLost(id)}
                       onAnswerPermission={(requestId, decision) =>
                         ws.answerPermission(id, requestId, decision)
                       }

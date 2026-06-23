@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import type {
   PermissionDecision,
   QuestionAnswer,
@@ -37,6 +37,14 @@ const HIDDEN_KEY = 'cw.hidden.v1'
  * lines up with the restored tabs.
  */
 const PANES_KEY = 'cw.panes.v1'
+
+/**
+ * How many of a workspace's recent conversations to surface (as lazy, suspended
+ * tabs) when it's first opened. Opening a workspace shows its recent convos
+ * instead of prompting which one to resume; the cap keeps the sidebar sane for
+ * repos with a long history. They're suspended, so this spawns no subprocesses.
+ */
+const RECENT_CONVOS_ON_OPEN = 10
 
 /** A session idle and off-screen this long gets its subprocess reaped. */
 const REAP_IDLE_MS = 5 * 60 * 1000
@@ -104,6 +112,42 @@ function lastAssistantText(items: TranscriptItem[] | undefined): string {
     if (text) return text
   }
   return ''
+}
+
+/** Hard cap on a re-fed transcript so a huge history can't blow the context. */
+const MAX_PRIMER_CHARS = 60_000
+
+/** Separator between the re-fed prior transcript and the user's live message. */
+const PRIMER_SEPARATOR =
+  '\n\n──────────\n[End of restored conversation. Continue from here — answer the message below.]\n\n'
+
+/**
+ * Flatten a transcript into compact text to re-feed as context after a resume
+ * dropped the conversation's memory. User/assistant prose is included verbatim;
+ * tool calls collapse to a one-line marker (the model needs the gist, not every
+ * argument). Oldest turns are trimmed first if the result exceeds the cap.
+ */
+function serializeTranscript(items: TranscriptItem[] | undefined): string {
+  if (!items?.length) return ''
+  const lines: string[] = []
+  for (const it of items) {
+    if (it.kind === 'tool_result') continue // folded into its tool_use marker
+    if (it.kind !== 'message') continue
+    const role = it.message.role === 'user' ? 'User' : 'Assistant'
+    const parts: string[] = []
+    for (const b of it.message.blocks) {
+      if (b.kind === 'text') parts.push(b.text)
+      else if (b.kind === 'thinking') continue // internal — not re-fed
+      else if (b.kind === 'tool_use') parts.push(`[used tool: ${b.name}]`)
+      else if (b.kind === 'image') parts.push('[image]')
+    }
+    const text = parts.join('\n').trim()
+    if (text) lines.push(`${role}: ${text}`)
+  }
+  let out = lines.join('\n\n')
+  if (out.length > MAX_PRIMER_CHARS) out = `…(earlier turns trimmed)…\n\n${out.slice(-MAX_PRIMER_CHARS)}`
+  if (!out) return ''
+  return `[Reconnected — the earlier conversation below was restored from the local transcript because the session's memory was lost. Use it as context.]\n\n${out}`
 }
 
 interface PersistedTab {
@@ -184,6 +228,13 @@ export function useWorkspace() {
   // and clobber the saved tabs before they came back.)
   const started = useRef(false)
   const ready = useRef(false)
+  // True while the one-time startup restore is still bringing saved tabs back.
+  // It starts true ONLY if there were saved tabs to restore, so a genuine first
+  // launch (nothing saved) shows the launcher immediately. While restoring, the
+  // app shows a quiet loading state instead of the launcher — otherwise the
+  // first render (tabs still empty) would flash the "new / resume session"
+  // prompt before the restored tabs land.
+  const [restoring, setRestoring] = useState(() => (savedOnce.current?.length ?? 0) > 0)
 
   const smoothers = useRef<Map<string, StreamSmoother>>(new Map())
   // Events for a session can land before its tab is registered (the SDK's
@@ -194,6 +245,10 @@ export function useWorkspace() {
   // localId → the status we last observed, so we can detect a busy→idle edge
   // (a completed task) and refresh that conversation's cached AI description.
   const lastSummaryStatus = useRef<Map<string, SessionStatus>>(new Map())
+  // localId → serialized prior transcript to re-feed on the next send, captured
+  // when a resume reported context loss. Consumed (and cleared) by doSend so the
+  // recovered history rides along with the user's next real message.
+  const pendingPrimer = useRef<Map<string, string>>(new Map())
 
   const ensureSmoother = useCallback((localId: string): StreamSmoother => {
     let sm = smoothers.current.get(localId)
@@ -212,39 +267,21 @@ export function useWorkspace() {
   // notified so re-renders don't re-fire, and clear the mark when the tab is read
   // again (so its next background completion notifies afresh).
   const notified = useRef<Set<string>>(new Set())
-  // Keep live notifications referenced. An un-referenced Notification can be
-  // garbage-collected before the user clicks it, which silently drops the
-  // `onclick` handler — so the click never focuses the app or opens the tab and
-  // the OS falls back to activating whatever process spawned us.
-  const liveNotifications = useRef<Map<string, Notification>>(new Map())
+  // The notification is created and owned by the MAIN process (see main/ipc.ts),
+  // which also handles the click: it focuses the window and pushes back the
+  // localId via onNotificationClicked. Creating it renderer-side as a Web
+  // Notification was fragile — the object could be GC'd before the click,
+  // dropping its `onclick` and letting the OS fall back to its default
+  // activation (which surfaced the repo picker instead of the conversation).
   const notify = useCallback((localId: string, title: string, preview: string) => {
-    if (typeof Notification === 'undefined') return
-    const show = (): void => {
-      const n = new Notification(title || 'Tesseract', {
-        body: preview || 'Finished responding',
-        // Re-use the per-session tag so a newer notification replaces an older
-        // one for the same tab instead of stacking up.
-        tag: localId
-      })
-      liveNotifications.current.get(localId)?.close()
-      liveNotifications.current.set(localId, n)
-      const release = (): void => {
-        if (liveNotifications.current.get(localId) === n)
-          liveNotifications.current.delete(localId)
-      }
-      n.onclose = release
-      n.onclick = () => {
-        void window.api.focusWindow()
-        dispatch({ t: 'setActive', localId })
-        n.close()
-        release()
-      }
-    }
-    if (Notification.permission === 'granted') show()
-    else if (Notification.permission !== 'denied')
-      void Notification.requestPermission().then((p) => {
-        if (p === 'granted') show()
-      })
+    window.api.showNotification({ localId, title, body: preview })
+  }, [])
+
+  // A notification click (handled in main) tells us which tab to open.
+  useEffect(() => {
+    return window.api.onNotificationClicked((localId) => {
+      dispatch({ t: 'setActive', localId })
+    })
   }, [])
 
   useEffect(() => {
@@ -296,7 +333,9 @@ export function useWorkspace() {
       /** Open beside the focused pane as a split, instead of replacing it. */
       split?: boolean,
       /** Send this as the session's first message right after it opens. */
-      initialPrompt?: string
+      initialPrompt?: string,
+      /** Which side of the focused pane to split on (default 'right'). */
+      side?: Side
     ) => {
       // Default to yolo unless the caller explicitly opts out.
       const { localId } = await window.api.startSession({ yolo: true, ...args })
@@ -321,7 +360,8 @@ export function useWorkspace() {
         // Seed the tab with the resume id so it persists immediately, before
         // the live session re-reports its id (or even if the resume fails).
         sdkSessionId: args.resumeSessionId,
-        split
+        split,
+        side
       })
       // Flush anything that arrived for this session before its smoother existed.
       const mine = earlyBuffer.current.filter((e) => e.localId === localId)
@@ -396,23 +436,30 @@ export function useWorkspace() {
     const restoredIds = new Set<string>()
     void (async () => {
       try {
-        for (const t of saved) {
-          try {
-            // Lazy restore: bring the tab back as SUSPENDED — load its history
-            // for display (if it has a resumable session) but DO NOT spawn a
-            // subprocess. It resumes (--resume) only on focus/message. A tab
-            // opened but never messaged (no session id) is restored fresh so its
-            // workspace still reappears. This also prevents a launch from
-            // spawning one agent per saved tab (the freeze).
-            const items = t.sdkSessionId
-              ? await window.api
+        // Lazy restore: bring each tab back as SUSPENDED — load its history for
+        // display (if it has a resumable session) but DO NOT spawn a subprocess.
+        // It resumes (--resume) only on focus/message. A tab opened but never
+        // messaged (no session id) is restored fresh so its workspace still
+        // reappears. This also prevents a launch from spawning one agent per
+        // saved tab (the freeze). History loads run in PARALLEL (not awaited one
+        // at a time) so all tabs reappear promptly rather than after a slow
+        // sequential chain of IPC reads — during which the app would otherwise
+        // sit on the launcher screen.
+        const histories = await Promise.all(
+          saved.map((t) =>
+            t.sdkSessionId
+              ? window.api
                   .loadHistory({
                     sessionId: t.sdkSessionId,
                     cwd: t.cwd,
                     provider: t.provider ?? 'claude'
                   })
                   .catch(() => [] as TranscriptItem[])
-              : []
+              : Promise.resolve([] as TranscriptItem[])
+          )
+        )
+        saved.forEach((t, i) => {
+          try {
             // Reuse the persisted localId so the saved pane tree (keyed by
             // localId) lines up; fall back to a fresh id for older saved lists.
             const localId = t.localId ?? newLocalId()
@@ -422,7 +469,7 @@ export function useWorkspace() {
               title: t.title,
               cwd: t.cwd,
               provider: t.provider ?? 'claude',
-              preloaded: items,
+              preloaded: histories[i],
               status: 'suspended',
               suspended: true,
               titled: true,
@@ -433,7 +480,7 @@ export function useWorkspace() {
           } catch {
             /* one tab failing to restore must not lose the others */
           }
-        }
+        })
         // Re-apply the saved split layout (pruned to tabs that came back). Each
         // openTab above reset panes to a single leaf, so this restores the tree.
         // Done before hideWorkspace so hiding can drop hidden panes from it.
@@ -457,6 +504,9 @@ export function useWorkspace() {
         // (the final dispatch above may not have changed state).
         ready.current = true
         persistTabs()
+        // Restored tabs (if any) are now in state — let the app render them and
+        // stop showing the loading state in place of the launcher.
+        setRestoring(false)
       }
     })()
   }, [begin, persistTabs])
@@ -498,6 +548,25 @@ export function useWorkspace() {
     },
     [ensureSmoother]
   )
+
+  // When a session reports lost context (a resume that didn't carry the
+  // conversation forward), snapshot its displayed transcript so the next send
+  // can re-feed it into the fresh session. Captured here (not at send time) so
+  // it reflects the history as it stood at the moment of loss. Cleared once the
+  // banner is dismissed / re-fed so a later loss can capture afresh.
+  useEffect(() => {
+    for (const tab of state.tabs) {
+      const sess = state.sessions[tab.localId]
+      if (sess?.contextLost) {
+        if (!pendingPrimer.current.has(tab.localId)) {
+          const primer = serializeTranscript(sess.items)
+          if (primer) pendingPrimer.current.set(tab.localId, primer)
+        }
+      } else {
+        pendingPrimer.current.delete(tab.localId)
+      }
+    }
+  }, [state])
 
   // Track when each live session most recently went idle, for the reaper.
   useEffect(() => {
@@ -599,7 +668,16 @@ export function useWorkspace() {
       }
       const id = `u-${(userSeq += 1)}`
       dispatch({ t: 'session', localId, action: { t: 'user', id, text: value, images } })
-      void window.api.send({ localId, text: value, images })
+      // If a prior resume dropped this conversation's memory, re-feed the saved
+      // transcript ahead of the user's message — on the WIRE only, so the user
+      // sees just their own bubble while the model regains full context.
+      const primer = pendingPrimer.current.get(localId)
+      if (primer) {
+        pendingPrimer.current.delete(localId)
+        dispatch({ t: 'session', localId, action: { t: 'clearContextLost' } })
+      }
+      const wireText = primer ? `${primer}${PRIMER_SEPARATOR}${value}` : value
+      void window.api.send({ localId, text: wireText, images })
     },
     [autoTitle]
   )
@@ -623,12 +701,100 @@ export function useWorkspace() {
         autoTitle(localId, value)
         const id = `u-${(userSeq += 1)}`
         dispatch({ t: 'session', localId, action: { t: 'user', id, text: value, images } })
-        void resumed.then(() => window.api.send({ localId, text: value, images }))
+        // A resume can report context loss before this send fires; if a primer
+        // was captured by then, re-feed it on the wire alongside the message.
+        void resumed.then(() => {
+          const primer = pendingPrimer.current.get(localId)
+          if (primer) {
+            pendingPrimer.current.delete(localId)
+            dispatch({ t: 'session', localId, action: { t: 'clearContextLost' } })
+          }
+          const wireText = primer ? `${primer}${PRIMER_SEPARATOR}${value}` : value
+          void window.api.send({ localId, text: wireText, images })
+        })
         return
       }
       doSend(localId, text, images)
     },
     [autoTitle, doSend, revive]
+  )
+
+  // Edit an earlier user message and rewind the conversation to that point: fork
+  // the SDK session up to just before the message (so the prior turns stay as
+  // context), drop the edited message and everything after it from the
+  // transcript, then resume the forked session and send the edited text as the
+  // new turn. Forking past the first message (or a session that was never
+  // persisted) yields no fork id — the edited text starts a fresh conversation.
+  const editAndRewind = useCallback(
+    async (localId: string, messageId: string, text: string, images?: UiImage[]) => {
+      const value = text.trim()
+      const hasImages = Boolean(images && images.length)
+      const sess = stateRef.current.sessions[localId]
+      const tab = stateRef.current.tabs.find((t) => t.localId === localId)
+      if (!sess || !tab || (!value && !hasImages)) return
+      const idx = sess.items.findIndex(
+        (it) => it.kind === 'message' && it.message.id === messageId && it.message.role === 'user'
+      )
+      if (idx < 0) return
+      // Position of the edited message among user messages — stable across the
+      // live `u-N` ids and persisted SDK uuids, so the backend can resolve it.
+      const userOrdinal = sess.items
+        .slice(0, idx)
+        .filter((it) => it.kind === 'message' && it.message.role === 'user').length
+      const sessionId = sess.sdkSessionId ?? tab.sdkSessionId
+
+      // Tear down the live subprocess — we're branching onto a new session.
+      smoothers.current.get(localId)?.reset()
+      smoothers.current.delete(localId)
+      idleSince.current.delete(localId)
+      pendingPrimer.current.delete(localId)
+      void window.api.closeSession(localId)
+
+      // Fork the persisted session up to just before the edited message. A null
+      // result (first message, or no persisted session) means "start fresh".
+      let resumeId: string | undefined
+      if (sessionId) {
+        try {
+          const r = await window.api.rewind({
+            sessionId,
+            cwd: tab.cwd,
+            provider: tab.provider,
+            userOrdinal
+          })
+          resumeId = r.sessionId ?? undefined
+        } catch {
+          /* fork failed — fall back to a fresh session */
+        }
+      }
+
+      autoTitle(localId, value)
+      // Truncate the transcript and rebase the tab onto the forked/fresh session.
+      dispatch({ t: 'rewindTo', localId, itemIndex: idx, sdkSessionId: resumeId })
+      // Revive that session (idle), then optimistically show the edited message
+      // (connecting) — matching the suspended-send ordering so the revive's idle
+      // status doesn't stomp the connecting state.
+      ensureSmoother(localId)
+      dispatch({ t: 'revive', localId })
+      const uid = `u-${(userSeq += 1)}`
+      dispatch({ t: 'session', localId, action: { t: 'user', id: uid, text: value, images } })
+      try {
+        await window.api.reviveSession({
+          localId,
+          cwd: tab.cwd,
+          provider: tab.provider,
+          resumeSessionId: resumeId,
+          pendingSend: true
+        })
+      } catch {
+        /* a failed resume surfaces as an error event; the tab stays usable */
+      }
+      const mine = earlyBuffer.current.filter((e) => e.localId === localId)
+      earlyBuffer.current = earlyBuffer.current.filter((e) => e.localId !== localId)
+      const sm = smoothers.current.get(localId)
+      for (const env of mine) sm?.push(env.event)
+      void window.api.send({ localId, text: value, images })
+    },
+    [autoTitle, ensureSmoother]
   )
 
   // Drain each tab's queue one message at a time as sessions return to idle.
@@ -640,15 +806,22 @@ export function useWorkspace() {
         const id = `u-${(userSeq += 1)}`
         dispatch({ t: 'dequeue', localId: tab.localId })
         dispatch({ t: 'session', localId: tab.localId, action: { t: 'user', id, text, images } })
-        void window.api.send({ localId: tab.localId, text, images })
+        const primer = pendingPrimer.current.get(tab.localId)
+        if (primer) {
+          pendingPrimer.current.delete(tab.localId)
+          dispatch({ t: 'session', localId: tab.localId, action: { t: 'clearContextLost' } })
+        }
+        const wireText = primer ? `${primer}${PRIMER_SEPARATOR}${text}` : text
+        void window.api.send({ localId: tab.localId, text: wireText, images })
       }
     }
   }, [state])
 
-  // Open a brand-new session beside the focused pane, growing the split.
+  // Open a brand-new session beside the focused pane (on `side`, default
+  // 'right'), growing the split.
   const newPane = useCallback(
-    (cwd: string, provider: BackendProvider = 'claude') =>
-      void begin({ cwd, provider, yolo: true }, undefined, undefined, undefined, true),
+    (cwd: string, provider: BackendProvider = 'claude', side: Side = 'right') =>
+      void begin({ cwd, provider, yolo: true }, undefined, undefined, undefined, true, undefined, side),
     [begin]
   )
 
@@ -699,19 +872,65 @@ export function useWorkspace() {
     [suspend]
   )
 
-  // Open a workspace: unhide it if hidden, then re-open all of its previous
-  // non-archived sessions by surfacing them (the most recent takes the focused
-  // pane, the rest stay in the sidebar and revive on click). A workspace with
-  // no prior sessions just starts a fresh one.
+  // Open a workspace: unhide it if hidden. If it's already open, just focus its
+  // most recent tab. If it's NOT open yet, surface its recent conversations from
+  // disk as lazy (suspended) tabs — no prompt, no subprocesses — with the most
+  // recent focused; a workspace with no prior conversations just starts fresh.
   const openWorkspace = useCallback(
-    (cwd: string, yolo = true, provider: BackendProvider = 'claude') => {
+    async (cwd: string, yolo = true, provider: BackendProvider = 'claude') => {
       const s = stateRef.current
       if (s.hiddenWorkspaces.includes(cwd)) dispatch({ t: 'unhideWorkspace', cwd })
       const existing = s.tabs
         .filter((t) => t.cwd === cwd && t.provider === provider && !t.archived)
         .sort((a, b) => a.seq - b.seq)
-      if (existing.length === 0) void begin({ cwd, provider, yolo })
-      else setActive(existing[existing.length - 1].localId)
+      // Already open → just focus it (don't re-flood the sidebar from disk or
+      // disturb an existing split layout).
+      if (existing.length > 0) {
+        setActive(existing[existing.length - 1].localId)
+        return
+      }
+      // Not open yet → pull this workspace's recent conversations from disk.
+      // Skip any whose session is already represented by a tab (e.g. archived).
+      const present = new Set(
+        s.tabs
+          .filter((t) => t.cwd === cwd && t.provider === provider)
+          .map((t) => s.sessions[t.localId]?.sdkSessionId ?? t.sdkSessionId)
+          .filter(Boolean) as string[]
+      )
+      const recent = (await window.api.listSessions(cwd, provider).catch(() => []))
+        .filter((sess) => !present.has(sess.sessionId))
+        .sort((a, b) => b.lastModified - a.lastModified)
+        .slice(0, RECENT_CONVOS_ON_OPEN)
+      // No prior conversations → start a fresh session.
+      if (recent.length === 0) {
+        void begin({ cwd, provider, yolo })
+        return
+      }
+      // Load histories in parallel, then open each as a suspended tab. Opening
+      // oldest-first leaves the MOST recent as the focused pane (openTab focuses
+      // the tab it opens). They revive (--resume) only when clicked/messaged.
+      const histories = await Promise.all(
+        recent.map((sess) =>
+          window.api
+            .loadHistory({ sessionId: sess.sessionId, cwd, provider })
+            .catch(() => [] as TranscriptItem[])
+        )
+      )
+      for (let i = recent.length - 1; i >= 0; i--) {
+        const sess = recent[i]
+        dispatch({
+          t: 'openTab',
+          localId: newLocalId(),
+          title: sess.summary || sess.firstPrompt || basename(cwd),
+          cwd,
+          provider,
+          preloaded: histories[i],
+          status: 'suspended',
+          suspended: true,
+          titled: true,
+          sdkSessionId: sess.sessionId
+        })
+      }
     },
     [begin, setActive]
   )
@@ -789,6 +1008,14 @@ export function useWorkspace() {
     []
   )
 
+  // Dismiss the "memory not restored" banner without re-feeding (the user
+  // accepts the fresh context). Drops the captured primer so nothing is
+  // prepended to the next message.
+  const dismissContextLost = useCallback((localId: string) => {
+    pendingPrimer.current.delete(localId)
+    dispatch({ t: 'session', localId, action: { t: 'clearContextLost' } })
+  }, [])
+
   // Replace a pane's conversation with a blank one. Reap the live subprocess and
   // forget the SDK session id so nothing resumes the old thread, then wipe the
   // transcript. The tab is left suspended-and-idle (see the clearSession action);
@@ -810,10 +1037,12 @@ export function useWorkspace() {
 
   return {
     state,
+    restoring,
     active,
     begin,
     newPane,
     send,
+    editAndRewind,
     interrupt,
     setActive,
     splitPane,
@@ -831,6 +1060,7 @@ export function useWorkspace() {
     answerPermission,
     answerQuestion,
     clearError,
+    dismissContextLost,
     clearSession
   }
 }

@@ -18,6 +18,28 @@ function ExternalLink({ href, children, ...rest }: ComponentProps<'a'>) {
   )
 }
 
+// Markdown images: constrain size so a large remote image can't blow out the
+// transcript layout, and degrade gracefully — if the URL fails to load, swap
+// the broken-image icon for the alt text rather than leaving a broken glyph.
+function MarkdownImage({ src, alt, ...rest }: ComponentProps<'img'>) {
+  return (
+    <img
+      {...rest}
+      src={src}
+      alt={alt}
+      loading="lazy"
+      className="my-1 max-w-full h-auto rounded-md border border-white/10"
+      onError={(e) => {
+        const img = e.currentTarget
+        const fallback = document.createElement('span')
+        fallback.className = 'text-[#8a90a0] italic'
+        fallback.textContent = alt ? `🖼 ${alt}` : '🖼 (image failed to load)'
+        img.replaceWith(fallback)
+      }}
+    />
+  )
+}
+
 /** Renders assistant/user text as GitHub-flavored markdown with code highlight + LaTeX math. */
 export const MarkdownText = memo(function MarkdownText({ text }: { text: string }) {
   return (
@@ -28,7 +50,7 @@ export const MarkdownText = memo(function MarkdownText({ text }: { text: string 
         // tree before highlight/katex walk it. Without it react-markdown
         // escapes raw HTML (<span>, <table>, <abbr>, …) into literal text.
         rehypePlugins={[rehypeRaw, rehypeHighlight, rehypeKatex]}
-        components={{ a: ExternalLink }}
+        components={{ a: ExternalLink, img: MarkdownImage }}
       >
         {text}
       </ReactMarkdown>

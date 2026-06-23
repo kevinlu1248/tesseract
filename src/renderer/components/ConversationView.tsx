@@ -7,6 +7,7 @@ import { Composer, type ComposerHandle } from './Composer'
 import { PermissionPrompt } from './PermissionPrompt'
 import { QuestionPrompt } from './QuestionPrompt'
 import { RecentCard } from './RecentCard'
+import { SelectionPopover } from './SelectionPopover'
 import { StatusBar } from './StatusBar'
 import { Transcript } from './Transcript'
 
@@ -29,6 +30,11 @@ interface Props {
   session: SessionState
   tab: Tab
   onSend: (text: string, images: UiImage[]) => void
+  /**
+   * Edit an earlier user message, rewinding the conversation to that point
+   * (forks the SDK session and re-runs from the edited text).
+   */
+  onEditMessage: (messageId: string, text: string, images: UiImage[]) => void
   /** Persist the composer's unsent contents (survives tab-switch remounts). */
   onDraftChange: (text: string, images: UiImage[]) => void
   onInterrupt: () => void
@@ -41,6 +47,8 @@ interface Props {
   /** Wipe this pane's conversation and start a fresh, blank one. */
   onClear: () => void
   onClearError: () => void
+  /** Dismiss the "memory not restored" banner (the captured history is dropped). */
+  onDismissContextLost: () => void
   onAnswerPermission: (requestId: string, decision: PermissionDecision) => void
   onAnswerQuestion: (requestId: string, answer: QuestionAnswer) => void
   /** Resume a prior conversation (clicked from the recent-conversations cards). */
@@ -62,6 +70,7 @@ export function ConversationView({
   session,
   tab,
   onSend,
+  onEditMessage,
   onDraftChange,
   onInterrupt,
   onUnqueue,
@@ -70,6 +79,7 @@ export function ConversationView({
   onNewPane,
   onClear,
   onClearError,
+  onDismissContextLost,
   onAnswerPermission,
   onAnswerQuestion,
   onResumeConversation,
@@ -115,6 +125,9 @@ export function ConversationView({
   // session receives its first message; switching between already-populated
   // sessions just snaps to the right mode.
   const [phase, setPhase] = useState<Phase>(empty ? 'centered' : 'docked')
+  // Whether the transcript is scrolled to its bottom. When it is, there's
+  // nothing peeking out below the fade, so we hide the gradient.
+  const [atBottom, setAtBottom] = useState(true)
   const prevEmpty = useRef(empty)
   useEffect(() => {
     if (prevEmpty.current && !empty) {
@@ -183,10 +196,28 @@ export function ConversationView({
   const floating = phase !== 'docked'
 
   const alerts =
-    session.permissions.length > 0 || session.questions.length > 0 || session.error
+    session.permissions.length > 0 ||
+    session.questions.length > 0 ||
+    session.error ||
+    session.contextLost
   const alertBlock = alerts ? (
     <div className="px-6 pb-2">
       <div className="max-w-3xl mx-auto space-y-2">
+        {session.contextLost && (
+          <div className="rounded-lg border border-amber-500/50 bg-amber-500/10 px-4 py-2.5 flex items-start gap-3">
+            <span className="text-[13px] text-amber-200 flex-1">
+              ⚠️ This conversation&apos;s memory couldn&apos;t be restored — the messages above
+              aren&apos;t in the model&apos;s context. Your next message will re-send them so it can
+              continue where you left off.
+            </span>
+            <button
+              onClick={onDismissContextLost}
+              className="text-amber-300 hover:text-amber-100 text-[12px]"
+            >
+              dismiss
+            </button>
+          </div>
+        )}
         {session.error && (
           <div className="rounded-lg border border-red-500/50 bg-red-500/10 px-4 py-2.5 flex items-start gap-3">
             <span className="text-[13px] text-red-200 flex-1">{session.error.message}</span>
@@ -258,7 +289,19 @@ export function ConversationView({
         onDragOver={onDragOver}
       >
         {/* Transcript appears as soon as there's something to show. */}
-        {phase !== 'centered' && <Transcript items={session.items} />}
+        {phase !== 'centered' && (
+          <Transcript
+            items={session.items}
+            onAtBottomChange={setAtBottom}
+            onEditMessage={onEditMessage}
+          />
+        )}
+
+        {/* Floating "Talk about this" button for text selected in the transcript;
+            its click quotes the selection into the composer draft. */}
+        {phase !== 'centered' && (
+          <SelectionPopover onQuote={(text) => composerRef.current?.quote(text)} />
+        )}
 
         {/* Docked alerts live in normal flow, above the composer. */}
         {!floating && alertBlock}
@@ -285,7 +328,9 @@ export function ConversationView({
           {!floating && (
             <div
               aria-hidden
-              className="pointer-events-none absolute bottom-full inset-x-0 h-16 bg-gradient-to-t from-ink-950 to-transparent"
+              className={`pointer-events-none absolute bottom-full inset-x-0 h-16 bg-gradient-to-t from-ink-950 to-transparent transition-opacity duration-200 ${
+                atBottom ? 'opacity-0' : 'opacity-100'
+              }`}
             />
           )}
 

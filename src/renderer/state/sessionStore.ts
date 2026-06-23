@@ -27,6 +27,13 @@ export interface SessionState {
   model?: string
   cwd?: string
   error?: { message: string; fatal: boolean }
+  /**
+   * True when a resume silently lost this conversation's context (the SDK
+   * started a fresh session instead of continuing the prior one). Drives the
+   * "memory not restored" banner; cleared once the transcript is re-fed into
+   * the new session (or the user dismisses it).
+   */
+  contextLost?: boolean
   currentAssistantId?: string
   /** Tokens in the prompt last sent to the model (the live context-window fill). */
   contextTokens?: number
@@ -44,8 +51,16 @@ export type SessionAction =
   | { t: 'user'; id: string; text: string; images?: UiImage[] }
   | { t: 'load'; items: TranscriptItem[]; status: SessionStatus }
   | { t: 'clearError' }
+  /** Dismiss the "context not restored" banner (manual, or once re-fed). */
+  | { t: 'clearContextLost' }
   /** Wipe the transcript back to a blank conversation, keeping cwd/model. */
   | { t: 'clear' }
+  /**
+   * Rewind the transcript: drop the item at `index` and everything after it
+   * (the user message being edited and all subsequent turns), settling any
+   * live-turn state. The edited message is re-appended separately via 'user'.
+   */
+  | { t: 'rewind'; index: number }
 
 function mapMessage(
   items: TranscriptItem[],
@@ -304,6 +319,8 @@ export function sessionReducer(state: SessionState, action: SessionAction): Sess
   switch (action.t) {
     case 'clearError':
       return { ...state, error: undefined }
+    case 'clearContextLost':
+      return { ...state, contextLost: false }
     case 'clear':
       // Drop the whole transcript (and any pending prompts / live-turn state)
       // back to a blank, idle conversation. cwd/model are preserved so the
@@ -311,6 +328,21 @@ export function sessionReducer(state: SessionState, action: SessionAction): Sess
       return { ...initialSessionState, status: 'idle', cwd: state.cwd, model: state.model }
     case 'load':
       return { ...initialSessionState, items: action.items, status: action.status }
+    case 'rewind':
+      // Truncate to everything before the edited message and clear transient
+      // turn state (pending prompts, the in-flight assistant id, banners). The
+      // session is rebased onto a forked/fresh backend that resumes on the next
+      // send, so it sits idle until then.
+      return {
+        ...state,
+        items: state.items.slice(0, action.index),
+        status: 'idle',
+        permissions: [],
+        questions: [],
+        error: undefined,
+        contextLost: false,
+        currentAssistantId: undefined
+      }
     case 'user': {
       const blocks: UiBlock[] = (action.images ?? []).map((image, i) => ({
         kind: 'image',
@@ -354,6 +386,11 @@ export function sessionReducer(state: SessionState, action: SessionAction): Sess
           return { ...state, error: { message: e.message, fatal: e.fatal } }
         case 'sdk_session':
           return { ...state, sdkSessionId: e.sdkSessionId }
+        case 'resume_failed':
+          // The resume started a fresh session — the transcript shown above is
+          // NOT in the model's context. Flag it so the UI warns and the next
+          // send re-feeds the prior history.
+          return { ...state, contextLost: true }
         case 'permission':
           return { ...state, permissions: [...state.permissions, e.request] }
         case 'permission_resolved':

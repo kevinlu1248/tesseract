@@ -129,6 +129,13 @@ export class AgentSdkAdapter implements BackendAdapter {
   // system_init idle below must not fire and flicker the composer back to idle.
   private pendingSend = false
 
+  // The session id we asked the SDK to resume, retained until the first
+  // system_init confirms whether the resume actually continued that session.
+  // A successful resume reports the SAME id back (forkSession is off); a
+  // different id means the resume silently started a fresh, context-less
+  // session — which we surface as `resume_failed` so the renderer can recover.
+  private requestedResumeId?: string
+
   private emit(event: SessionOutboundEvent): void {
     this.cb?.onEvent(event)
   }
@@ -142,6 +149,7 @@ export class AgentSdkAdapter implements BackendAdapter {
     // the working dot indefinitely. Open idle; the first send flips to running.
     this.awaitingFirstSend = Boolean(opts.resumeSessionId)
     this.pendingSend = Boolean(opts.pendingSend)
+    this.requestedResumeId = opts.resumeSessionId
     // A resume triggered by an outgoing message opens 'connecting' to match the
     // renderer's optimistic state — otherwise this 'idle' would land mid-resume
     // and flicker the composer back to idle before the send registers.
@@ -246,7 +254,24 @@ export class AgentSdkAdapter implements BackendAdapter {
     for (const event of events) {
       this.emit({ kind: 'cc', event })
       if (event.type === 'system_init') {
-        if (event.sessionId) this.emit({ kind: 'sdk_session', sdkSessionId: event.sessionId })
+        if (event.sessionId) {
+          this.emit({ kind: 'sdk_session', sdkSessionId: event.sessionId })
+          // First init after a resume request: did the resume actually continue
+          // the session? A matching id means yes; a different id means the SDK
+          // started fresh and the prior transcript is NOT in context. Either way
+          // this check is one-shot — clear the requested id so later inits (e.g.
+          // after a compaction) never re-trigger it.
+          if (this.requestedResumeId) {
+            const requested = this.requestedResumeId
+            this.requestedResumeId = undefined
+            if (event.sessionId !== requested)
+              this.emit({
+                kind: 'resume_failed',
+                requestedSessionId: requested,
+                newSessionId: event.sessionId
+              })
+          }
+        }
         // The SDK has booted and is waiting for input — the session is ready,
         // not working. Report idle so a fresh tab stops showing the "running"
         // dot and the first user message sends immediately instead of queuing.

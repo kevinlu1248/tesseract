@@ -5,7 +5,9 @@ import {
   type AnswerQuestionArgs,
   type BackendProvider,
   type CreateWorktreeArgs,
+  type NotifyArgs,
   type ReviveSessionArgs,
+  type RewindArgs,
   type SendArgs,
   type SessionCardUpdate,
   type SessionEventEnvelope,
@@ -21,6 +23,7 @@ const api: WorkspaceApi = {
   createWorktree: (args: CreateWorktreeArgs) => ipcRenderer.invoke(IPC.worktreeCreate, args),
   reviveSession: (args: ReviveSessionArgs) => ipcRenderer.invoke(IPC.sessionRevive, args),
   send: (args: SendArgs) => ipcRenderer.invoke(IPC.sessionSend, args),
+  rewind: (args: RewindArgs) => ipcRenderer.invoke(IPC.sessionRewind, args),
   interrupt: (localId: string) => ipcRenderer.invoke(IPC.sessionInterrupt, localId),
   closeSession: (localId: string) => ipcRenderer.invoke(IPC.sessionClose, localId),
   answerPermission: (args: AnswerPermissionArgs) =>
@@ -41,7 +44,18 @@ const api: WorkspaceApi = {
     ipcRenderer.invoke(IPC.sessionSummarize, args),
   getRecentScreenshot: () => ipcRenderer.invoke(IPC.screenshotRecent),
   focusWindow: () => ipcRenderer.invoke(IPC.windowFocus),
+  showNotification: (args: NotifyArgs) => ipcRenderer.send(IPC.notifyShow, args),
+  onNotificationClicked: (cb: (localId: string) => void) => {
+    const listener = (_e: IpcRendererEvent, localId: string): void => cb(localId)
+    ipcRenderer.on(IPC.notifyClicked, listener)
+    return () => ipcRenderer.removeListener(IPC.notifyClicked, listener)
+  },
   restartApp: () => ipcRenderer.invoke(IPC.appRestart),
+  onClosePaneRequest: (cb: () => void) => {
+    const listener = (): void => cb()
+    ipcRenderer.on(IPC.menuClosePane, listener)
+    return () => ipcRenderer.removeListener(IPC.menuClosePane, listener)
+  },
   onSessionEvent: (cb: (env: SessionEventEnvelope) => void) => {
     const listener = (_e: IpcRendererEvent, env: SessionEventEnvelope): void => cb(env)
     ipcRenderer.on(IPC.sessionEvent, listener)
