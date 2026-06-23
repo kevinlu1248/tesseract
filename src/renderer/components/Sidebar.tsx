@@ -4,6 +4,10 @@ import type { BackendProvider, SessionStatus } from '../../shared/ipc'
 import { dotFor, type DotState, type Tab } from '../state/workspaceStore'
 import { TAB_DND_MIME } from './Pane'
 
+// macOS uses an inset title bar (hiddenInset), so the traffic-light buttons
+// sit in the top-left. The sidebar header must leave room for them.
+const IS_MAC = typeof navigator !== 'undefined' && navigator.platform.toUpperCase().includes('MAC')
+
 interface Props {
   tabs: Tab[]
   statuses: Record<string, SessionStatus>
@@ -274,7 +278,10 @@ export function Sidebar({
       style={{ width }}
       className="shrink-0 flex flex-col border-r border-ink-800 bg-ink-900/60"
     >
-      <div className="app-drag h-11 flex items-center gap-2 px-3 border-b border-ink-800">
+      <div
+        className="app-drag h-11 flex items-center gap-2 px-3 border-b border-ink-800"
+        style={IS_MAC ? { paddingLeft: 76 } : undefined}
+      >
         <img src="/icon.svg" alt="Tesseract" className="w-5 h-5 rounded-md shrink-0" />
         <button
           onClick={onToggleCollapse}
@@ -285,9 +292,12 @@ export function Sidebar({
         </button>
         <button
           onClick={() => {
-            if (window.confirm('Restart Tesseract? This closes all running sessions.')) onRestart()
+            // Both dev and packaged now do a full rebuild + relaunch (dev spawns
+            // a fresh `npm run dev`), which closes every running session.
+            if (window.confirm('Rebuild and restart Tesseract? This closes all running sessions.'))
+              onRestart()
           }}
-          title="Restart the app (frontend + backend)"
+          title="Rebuild and restart the app (frontend + backend)"
           className="no-drag ml-auto grid place-items-center px-1.5 py-1 rounded-lg text-ink-400 hover:text-ink-100 hover:bg-ink-800 transition-colors"
         >
           <LuRotateCw size={14} aria-hidden />
@@ -297,7 +307,7 @@ export function Sidebar({
           title="Open another workspace"
           className="no-drag ml-1.5 px-2.5 py-1 rounded-lg bg-ink-700 hover:bg-ink-600 text-ink-100 text-[12px] font-semibold transition-colors"
         >
-          + Workspace
+          +
         </button>
       </div>
 

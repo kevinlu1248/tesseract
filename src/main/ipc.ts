@@ -1,10 +1,13 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron'
+import { spawn } from 'node:child_process'
+import { join } from 'node:path'
+import { app, BrowserWindow, dialog, ipcMain, Notification } from 'electron'
 import {
   IPC,
   type AnswerPermissionArgs,
   type AnswerQuestionArgs,
   type BackendProvider,
   type CreateWorktreeArgs,
+  type NotifyArgs,
   type ReviveSessionArgs,
   type SendArgs,
   type SessionCardUpdate,
@@ -93,19 +96,74 @@ export function registerIpc(getWindow: () => BrowserWindow | null): SessionManag
 
   ipcMain.handle(IPC.screenshotRecent, () => findRecentScreenshot())
 
-  ipcMain.handle(IPC.windowFocus, () => {
+  const focus = (): void => {
     const win = getWindow()
     if (!win) return
     if (win.isMinimized()) win.restore()
     win.show()
     win.focus()
+  }
+
+  ipcMain.handle(IPC.windowFocus, () => focus())
+
+  // OS notifications for background-finished turns are created HERE (main), not
+  // in the renderer. A renderer-side Web Notification can be garbage-collected
+  // before the user clicks it, silently dropping its `onclick` — at which point
+  // clicking the banner falls through to the OS default activation (which, in
+  // this app, surfaced the repo picker instead of focusing the conversation).
+  // A main-process Notification kept referenced until click avoids that.
+  //
+  // Keyed by localId so a newer notification for the same tab replaces the
+  // previous one. The reference is held until the notification is clicked, so
+  // its `click` handler is always live — even from Notification Center.
+  const liveNotifications = new Map<string, Notification>()
+  ipcMain.on(IPC.notifyShow, (_e, args: NotifyArgs) => {
+    if (!Notification.isSupported()) return
+    liveNotifications.get(args.localId)?.close()
+    const n = new Notification({
+      title: args.title || 'Tesseract',
+      body: args.body || 'Finished responding'
+    })
+    liveNotifications.set(args.localId, n)
+    n.on('click', () => {
+      liveNotifications.delete(args.localId)
+      focus()
+      const win = getWindow()
+      if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
+        win.webContents.send(IPC.notifyClicked, args.localId)
+      }
+    })
+    n.show()
   })
 
-  // Full restart: relaunch a fresh process, then quit this one. `app.quit()`
-  // fires `before-quit`, which tears down every live session's subprocess, so
-  // the new instance starts clean (any stragglers are reaped on boot by
-  // sweepOrphanAgents). The renderer reloads as part of the new process.
+  // Restart into the latest code — a true rebuild + relaunch.
+  //
+  // In dev (`electron-vite dev`), the Vite dev server and the main/preload
+  // build live in the PARENT electron-vite process. A bare `app.relaunch()`
+  // would kill that parent (dev server dies, `out/main` goes stale) and come
+  // back blank. So instead we spawn a FRESH `npm run dev` — which rebuilds
+  // main/preload and serves the latest renderer — detached so it outlives this
+  // process, then quit. The short sleep lets the old dev server release the
+  // pinned port (strictPort 5273) before the new one binds.
+  //
+  // In a packaged build there is no dev server: relaunch the whole app so both
+  // main and renderer load the new code on disk.
+  //
+  // Either way `app.quit()` fires `before-quit`, tearing down every live
+  // session's subprocess so the new instance starts clean (stragglers are
+  // reaped on boot by sweepOrphanAgents).
   ipcMain.handle(IPC.appRestart, () => {
+    if (process.env['ELECTRON_RENDERER_URL']) {
+      const projectRoot = join(__dirname, '..', '..') // out/main -> project root
+      spawn('sh', ['-c', 'sleep 2 && npm run dev'], {
+        cwd: projectRoot,
+        detached: true,
+        stdio: 'ignore',
+        env: process.env
+      }).unref()
+      app.quit()
+      return
+    }
     app.relaunch()
     app.quit()
   })
