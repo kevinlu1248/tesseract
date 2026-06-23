@@ -25,6 +25,8 @@ interface Props {
   onClosePane?: () => void
   /** Open a new session beside this pane as a split. */
   onNewPane?: () => void
+  /** Wipe this pane's conversation and replace it with a fresh, blank one. */
+  onClear?: () => void
   /** Present only on the leftmost pane while the sidebar is hidden — reveals it. */
   onShowSidebar?: () => void
   /**
@@ -76,6 +78,7 @@ export function StatusBar({
   onClose,
   onClosePane,
   onNewPane,
+  onClear,
   onShowSidebar,
   reorderId
 }: Props) {
@@ -133,6 +136,15 @@ export function StatusBar({
         >
           {model}
         </span>
+      )}
+      {onClear && (
+        <button
+          onClick={onClear}
+          className="no-drag text-ink-400 hover:text-ink-200 px-2 py-1 rounded hover:bg-ink-800"
+          title="Clear conversation (start a fresh, blank one)"
+        >
+          ⌫
+        </button>
       )}
       {onNewPane && (
         <button

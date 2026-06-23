@@ -5,6 +5,8 @@ import { summarizeTool } from '../lib/toolMeta'
 import { CodeDiff } from './CodeDiff'
 import { ToolResultBody } from './ToolResultCard'
 import { SubagentCard } from './SubagentCard'
+import { AskedQuestionCard } from './AskedQuestionCard'
+import { ScrollGateContext, useScrollGate } from './scrollGate'
 
 export function ToolUseCard({
   block,
@@ -17,6 +19,13 @@ export function ToolUseCard({
   // newer ones — both render as the SubagentCard.
   if (block.name === 'Task' || block.name === 'Agent')
     return <SubagentCard block={block} result={result} />
+  // AskUserQuestion is the model asking the user to choose — render the
+  // question + chosen answer, never as a "failed" tool. The answer is delivered
+  // to the model by resolving the SDK permission as a deny (the only available
+  // short-circuit), which flags the tool_result as an error; that denial is the
+  // transport, not a real failure, so it must not surface as one.
+  if (block.name === 'AskUserQuestion')
+    return <AskedQuestionCard block={block} result={result} />
   // Edits auto-expand to show the diff and stay open.
   if (block.name === 'Edit' || block.name === 'MultiEdit')
     return (
@@ -73,12 +82,19 @@ function ExpandableTool({
   autoCollapse?: boolean
 }) {
   const [open, setOpen] = useState(autoCollapse ? !block.done : defaultOpen)
+  // The expanded body is clipped (overflow-hidden) by default so the page
+  // scrolls past it cleanly; clicking into it activates its own scroll so it
+  // doesn't trap the wheel inside another scrollable (scrollable-in-scrollable).
+  const [scrollable, setScrollable] = useState(false)
   const wasDone = useRef(block.done)
   useEffect(() => {
     if (autoCollapse && block.done && !wasDone.current) setOpen(false)
     wasDone.current = block.done
   }, [autoCollapse, block.done])
-  const toggle = () => setOpen(!open)
+  const toggle = () => {
+    setOpen(!open)
+    setScrollable(false)
+  }
   const expanded = body ?? (result != null ? <ToolResultBody result={result} /> : null)
 
   if (expanded == null) {
@@ -98,9 +114,14 @@ function ExpandableTool({
         <ToolLine block={block} result={result} />
       </button>
       {open && (
-        <div className="mt-1 mb-2 ml-3 max-h-80 overflow-y-auto">
-          {expanded}
-        </div>
+        <ScrollGateContext.Provider value={scrollable}>
+          {/* The wrapper itself doesn't scroll — each inner body owns a single
+              gated scroll container (see scrollGate.ts), so there's never a
+              scrollable nested inside a scrollable. mousedown arms the gate. */}
+          <div className="mt-1 mb-2" onMouseDown={() => setScrollable(true)}>
+            {expanded}
+          </div>
+        </ScrollGateContext.Provider>
       )}
     </div>
   )
@@ -121,8 +142,13 @@ function EditDiff({ block }: { block: UiToolUseBlock }) {
   const hasEdits = edits.some((e) => e.old_string != null || e.new_string != null)
 
   if (!hasEdits) return <div className="text-[12px] text-ink-500 italic">collecting edit…</div>
+  return <EditDiffBody edits={edits} file={file} />
+}
+
+function EditDiffBody({ edits, file }: { edits: EditPair[]; file?: string }) {
+  const overflowY = useScrollGate('y')
   return (
-    <div className="space-y-2">
+    <div className={`space-y-2 max-h-80 ${overflowY}`}>
       {edits.map((e, i) => (
         <CodeDiff key={i} oldText={e.old_string ?? ''} newText={e.new_string ?? ''} filePath={file} />
       ))}
@@ -137,8 +163,15 @@ function WriteContent({ block }: { block: UiToolUseBlock }) {
   const file = typeof input.file_path === 'string' ? input.file_path : undefined
 
   if (content == null) return <div className="text-[12px] text-ink-500 italic">collecting input…</div>
+  return <WriteContentBody content={content} file={file} />
+}
+
+function WriteContentBody({ content, file }: { content: string; file?: string }) {
+  const overflowY = useScrollGate('y')
   return (
-    <pre className="hljs text-[12px] leading-relaxed font-mono whitespace-pre-wrap break-words bg-[#0d1117] rounded px-3 py-2 m-0 max-h-80 overflow-y-auto">
+    <pre
+      className={`hljs text-[12px] leading-relaxed font-mono whitespace-pre-wrap break-words bg-[#0d1117] rounded px-3 py-2 m-0 max-h-80 ${overflowY}`}
+    >
       <code dangerouslySetInnerHTML={{ __html: highlightCode(content, langFromPath(file)) }} />
     </pre>
   )

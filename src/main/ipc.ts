@@ -1,18 +1,21 @@
-import { BrowserWindow, dialog, ipcMain } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import {
   IPC,
   type AnswerPermissionArgs,
   type AnswerQuestionArgs,
   type BackendProvider,
+  type CreateWorktreeArgs,
   type ReviveSessionArgs,
   type SendArgs,
   type SessionCardUpdate,
   type SessionEventEnvelope,
-  type StartSessionArgs
+  type StartSessionArgs,
+  type SummarizeSessionArgs
 } from '../shared/ipc'
 import { detectAuth } from './auth'
 import { findRecentScreenshot } from './screenshots'
 import { SessionManager } from './sessions/SessionManager'
+import { createWorktree } from './sessions/worktree'
 
 export function registerIpc(getWindow: () => BrowserWindow | null): SessionManager {
   const broadcast = (env: SessionEventEnvelope): void => {
@@ -54,6 +57,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): SessionManag
   })
 
   ipcMain.handle(IPC.sessionStart, (_e, args: StartSessionArgs) => manager.start(args))
+  ipcMain.handle(IPC.worktreeCreate, (_e, args: CreateWorktreeArgs) => createWorktree(args))
   ipcMain.handle(IPC.sessionRevive, (_e, args: ReviveSessionArgs) => manager.revive(args))
   ipcMain.handle(IPC.sessionSend, (_e, args: SendArgs) => manager.send(args))
   ipcMain.handle(IPC.sessionInterrupt, (_e, localId: string) => manager.interrupt(localId))
@@ -71,12 +75,20 @@ export function registerIpc(getWindow: () => BrowserWindow | null): SessionManag
     manager.getSessionSummaries(cwd, provider)
   )
   ipcMain.handle(
+    IPC.sessionGenerateSummary,
+    (_e, sessionId: string, cwd: string, provider?: BackendProvider) =>
+      manager.generateSessionSummary(cwd, provider, sessionId)
+  )
+  ipcMain.handle(
     IPC.sessionLoadHistory,
     (_e, args: { sessionId: string; cwd: string; provider?: BackendProvider }) =>
       manager.loadHistory(args)
   )
   ipcMain.handle(IPC.sessionGenerateTitle, (_e, firstMessage: string) =>
     manager.generateTitle(firstMessage)
+  )
+  ipcMain.handle(IPC.sessionSummarize, (_e, args: SummarizeSessionArgs) =>
+    manager.summarizeSession(args)
   )
 
   ipcMain.handle(IPC.screenshotRecent, () => findRecentScreenshot())
@@ -87,6 +99,15 @@ export function registerIpc(getWindow: () => BrowserWindow | null): SessionManag
     if (win.isMinimized()) win.restore()
     win.show()
     win.focus()
+  })
+
+  // Full restart: relaunch a fresh process, then quit this one. `app.quit()`
+  // fires `before-quit`, which tears down every live session's subprocess, so
+  // the new instance starts clean (any stragglers are reaped on boot by
+  // sweepOrphanAgents). The renderer reloads as part of the new process.
+  ipcMain.handle(IPC.appRestart, () => {
+    app.relaunch()
+    app.quit()
   })
 
   return manager

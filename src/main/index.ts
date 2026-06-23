@@ -62,6 +62,18 @@ function createWindow(): void {
     return { action: 'deny' }
   })
 
+  // Safety net: a plain <a href> click (no target=_blank) triggers a navigation
+  // rather than window.open, which would replace the app. Intercept any attempt
+  // to navigate away from the app shell and hand the URL to the OS browser.
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    const appUrl = process.env['ELECTRON_RENDERER_URL']
+    if (appUrl && url.startsWith(appUrl)) return // allow in-app dev navigation
+    if (/^https?:|^mailto:/i.test(url)) {
+      event.preventDefault()
+      void shell.openExternal(url)
+    }
+  })
+
   // electron-vite injects the dev server URL in development.
   const devUrl = process.env['ELECTRON_RENDERER_URL']
   if (devUrl) {

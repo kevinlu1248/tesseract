@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type DragEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react'
 import type { AuthInfo, PermissionDecision, QuestionAnswer, SessionCard } from '../../shared/ipc'
 import type { UiImage } from '../../shared/schema'
 import type { SessionState } from '../state/sessionStore'
@@ -6,6 +6,7 @@ import type { Tab } from '../state/workspaceStore'
 import { Composer, type ComposerHandle } from './Composer'
 import { PermissionPrompt } from './PermissionPrompt'
 import { QuestionPrompt } from './QuestionPrompt'
+import { RecentCard } from './RecentCard'
 import { StatusBar } from './StatusBar'
 import { Transcript } from './Transcript'
 
@@ -37,6 +38,8 @@ interface Props {
   onClosePane?: () => void
   /** Open a new session beside this pane as a split. */
   onNewPane?: () => void
+  /** Wipe this pane's conversation and start a fresh, blank one. */
+  onClear: () => void
   onClearError: () => void
   onAnswerPermission: (requestId: string, decision: PermissionDecision) => void
   onAnswerQuestion: (requestId: string, answer: QuestionAnswer) => void
@@ -54,11 +57,6 @@ function basename(p?: string): string {
   return parts[parts.length - 1] || p
 }
 
-function clamp(text: string, max = 72): string {
-  const oneLine = text.replace(/\s+/g, ' ').trim()
-  return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine
-}
-
 export function ConversationView({
   auth,
   session,
@@ -70,6 +68,7 @@ export function ConversationView({
   onClose,
   onClosePane,
   onNewPane,
+  onClear,
   onClearError,
   onAnswerPermission,
   onAnswerQuestion,
@@ -134,18 +133,27 @@ export function ConversationView({
   // fallbacks immediately and patch each card in place as its summary arrives
   // over the onSessionSummaryUpdated push channel.
   const [cards, setCards] = useState<SessionCard[]>([])
+  // Session ids we've already kicked off lazy generation for, so a card that
+  // re-enters the viewport doesn't fire a duplicate request.
+  const requested = useRef<Set<string>>(new Set())
+  // Key the fetch off `tab.cwd`, not `session.cwd`: the tab's cwd is known the
+  // moment the tab is created, whereas session.cwd is only populated once the
+  // backend streams its first event. A fresh, never-messaged session has no
+  // events yet, so session.cwd is undefined — and the recent-conversation cards
+  // (which only matter in that empty state) would never load.
   useEffect(() => {
-    if (!session.cwd) return
+    if (!tab.cwd) return
     let alive = true
+    requested.current = new Set()
     window.api
-      .getSessionSummaries(session.cwd, tab.provider)
+      .getSessionSummaries(tab.cwd, tab.provider)
       .then((list) => {
         if (alive) setCards(list)
       })
       .catch(() => undefined)
     const unsubscribe = window.api.onSessionSummaryUpdated((update) => {
       if (!alive) return
-      if (update.cwd !== session.cwd || update.provider !== tab.provider) return
+      if (update.cwd !== tab.cwd || update.provider !== tab.provider) return
       setCards((prev) =>
         prev.map((c) => (c.sessionId === update.card.sessionId ? update.card : c))
       )
@@ -154,7 +162,22 @@ export function ConversationView({
       alive = false
       unsubscribe()
     }
-  }, [session.cwd, tab.provider])
+  }, [tab.cwd, tab.provider])
+
+  // Lazily generate a card's AI summary the first time it scrolls into view.
+  // The result streams back over the onSessionSummaryUpdated channel above
+  // (and patches the card), so we only need to fire the request once per id.
+  const requestSummary = useCallback(
+    (sessionId: string) => {
+      if (!tab.cwd || requested.current.has(sessionId)) return
+      requested.current.add(sessionId)
+      window.api.generateSessionSummary(sessionId, tab.cwd, tab.provider).catch(() => {
+        // Allow a retry on a later reveal if the request failed outright.
+        requested.current.delete(sessionId)
+      })
+    },
+    [tab.cwd, tab.provider]
+  )
 
   const centered = phase === 'centered'
   const floating = phase !== 'docked'
@@ -218,12 +241,16 @@ export function ConversationView({
         status={session.status}
         auth={auth}
         model={session.model}
-        cwd={session.cwd}
+        cwd={session.cwd ?? tab.cwd}
         contextTokens={session.contextTokens}
         onClose={onClose}
         onClosePane={onClosePane}
         onNewPane={onNewPane}
+        onClear={onClear}
         onShowSidebar={onShowSidebar}
+        // `onClosePane` is only supplied while split, so it doubles as the
+        // "this pane can be repositioned" signal.
+        reorderId={onClosePane ? tab.localId : undefined}
       />
 
       <div
@@ -248,9 +275,20 @@ export function ConversationView({
               ? `absolute inset-x-0 px-6 transition-all duration-500 ease-out ${
                   centered ? 'top-1/2 -translate-y-1/2' : 'top-full -translate-y-full'
                 }`
-              : ''
+              : 'relative'
           }
         >
+          {/* Soft fade above the docked composer so the scrolling transcript
+              melts into the input area instead of ending on a hard edge. Sits
+              just above the composer and is pointer-transparent so it never
+              intercepts clicks/scroll. */}
+          {!floating && (
+            <div
+              aria-hidden
+              className="pointer-events-none absolute bottom-full inset-x-0 h-16 bg-gradient-to-t from-ink-950 to-transparent"
+            />
+          )}
+
           {/* Greeting — floats above the composer, fades out on dock. */}
           {floating && (
             <div
@@ -260,7 +298,7 @@ export function ConversationView({
             >
               <div className="max-w-3xl mx-auto">
                 <h2 className="text-2xl font-semibold text-ink-100">
-                  What should we build{basename(session.cwd) ? ` in ${basename(session.cwd)}` : ''}?
+                  What should we build{basename(tab.cwd) ? ` in ${basename(tab.cwd)}` : ''}?
                 </h2>
                 <p className="mt-1.5 text-[13px] text-ink-400">
                   Describe a task, or pick up where you left off below.
@@ -287,23 +325,13 @@ export function ConversationView({
                     </div>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                       {cards.map((card) => (
-                        <button
+                        <RecentCard
                           key={card.sessionId}
-                          onClick={() => onResumeConversation(card.sessionId)}
-                          title={card.description ?? card.title}
-                          className="group text-left px-3.5 py-2.5 rounded-xl border border-ink-700 bg-ink-850 hover:border-accent/70 hover:bg-ink-800 transition-colors"
-                        >
-                          <div className="text-[13px] font-medium text-ink-100 truncate group-hover:text-white">
-                            {clamp(card.title, 60)}
-                          </div>
-                          <div className="mt-0.5 text-[12px] text-ink-400 line-clamp-2 min-h-[2.25em]">
-                            {card.description ?? (
-                              <span className="italic text-ink-500">
-                                {card.pending ? 'Summarizing…' : 'No description'}
-                              </span>
-                            )}
-                          </div>
-                        </button>
+                          card={card}
+                          active={centered}
+                          onResume={onResumeConversation}
+                          onVisible={requestSummary}
+                        />
                       ))}
                     </div>
                   </>

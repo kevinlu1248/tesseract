@@ -84,6 +84,33 @@ export interface Tab {
   draft?: DraftMessage
 }
 
+/** Which edge of a pane a drag is dropped against. */
+export type Side = 'left' | 'right' | 'top' | 'bottom'
+
+/**
+ * The layout of the main area, as a tree. A `leaf` is one session (its tab's
+ * localId); a `split` lays its children out in a `row` (side by side) or a
+ * `col` (stacked top to bottom). Nesting a row inside a col (and vice versa)
+ * gives arbitrary tiled layouts. `null` means the main area is empty.
+ *
+ * Invariants the helpers maintain: a split always has ≥ 2 children, and a
+ * leaf's id appears at most once in the whole tree.
+ */
+export type PaneNode =
+  | { t: 'leaf'; id: string }
+  | {
+      t: 'split'
+      dir: 'row' | 'col'
+      children: PaneNode[]
+      /**
+       * Relative sizes (flex-grow weights) for each child, parallel to
+       * `children`. Dragging a divider rewrites these. Absent — or out of sync
+       * with the child count after a split/close — means "share equally", which
+       * the renderer falls back to.
+       */
+      sizes?: number[]
+    }
+
 export interface WorkspaceState {
   sessions: Record<string, SessionState>
   tabs: Tab[]
@@ -94,12 +121,12 @@ export interface WorkspaceState {
    */
   hiddenWorkspaces: string[]
   /**
-   * The sessions currently shown in the main area, left → right. A single entry
-   * is the normal full-width view; two or more is a split. `activeId` is always
-   * one of these (the focused pane). Drag-and-drop from the sidebar inserts or
-   * moves entries here via the `splitPane` action.
+   * The sessions currently shown in the main area, as a layout tree (see
+   * `PaneNode`). A lone leaf is the normal full-width view; any split is a tiled
+   * layout. `activeId` is always one of the tree's leaves (the focused pane).
+   * Drag-and-drop from the sidebar inserts or moves leaves via `splitPane`.
    */
-  panes: string[]
+  panes: PaneNode | null
   activeId: string | null
   /**
    * Whether the app window is focused/visible. A tab counts as "being looked
@@ -114,7 +141,7 @@ export const initialWorkspaceState: WorkspaceState = {
   sessions: {},
   tabs: [],
   hiddenWorkspaces: [],
-  panes: [],
+  panes: null,
   activeId: null,
   focused: true,
   seq: 0
@@ -143,9 +170,20 @@ export type WorkspaceAction =
   /** Backend is being resumed — mark the tab live again. */
   | { t: 'revive'; localId: string }
   /** Drop a session into the split next to `anchorId`, on the given side. */
-  | { t: 'splitPane'; localId: string; anchorId: string; side: 'left' | 'right' }
+  | { t: 'splitPane'; localId: string; anchorId: string; side: Side }
   /** Remove a session from the split view (the session itself stays open). */
   | { t: 'closePane'; localId: string }
+  /**
+   * Set the child sizes (flex-grow weights) of the split at `path` — the chain
+   * of child indices from the root to that split — after dragging its divider.
+   */
+  | { t: 'resizePane'; path: number[]; sizes: number[] }
+  /**
+   * Re-apply a saved pane layout at startup. `keep` limits it to tabs that
+   * actually restored (and the reducer further prunes to live sessions), so a
+   * tab that failed to come back can't leave a dangling pane.
+   */
+  | { t: 'restorePanes'; panes: PaneNode | null; activeId: string | null; keep: Set<string> }
   | { t: 'setFocus'; focused: boolean }
   | { t: 'archive'; localId: string }
   | { t: 'unarchive'; localId: string }
@@ -160,6 +198,14 @@ export type WorkspaceAction =
   | { t: 'enqueue'; localId: string; text: string; images?: UiImage[] }
   | { t: 'unqueue'; localId: string; index: number }
   | { t: 'dequeue'; localId: string }
+  /**
+   * Replace a tab's conversation with a blank one: wipe the transcript and
+   * forget the SDK session id so the next message starts a fresh thread rather
+   * than resuming. The backend subprocess is reaped separately (see
+   * useWorkspace.clearSession); the tab is marked suspended so the next
+   * send/focus revives it fresh (no --resume).
+   */
+  | { t: 'clearSession'; localId: string }
   | { t: 'session'; localId: string; action: SessionAction }
 
 function patchTab(state: WorkspaceState, localId: string, fn: (t: Tab) => Tab): Tab[] {
@@ -177,21 +223,145 @@ function nextActive(tabs: Tab[], leaving: string, hidden: string[]): string | nu
   return visible.length ? visible[visible.length - 1].localId : null
 }
 
+// ── Pane-tree helpers ──────────────────────────────────────────────────────
+// All operations are pure and rebuild only the spine they touch. Two invariants
+// are preserved everywhere: splits never drop below 2 children (a split that
+// would have one child collapses into that child), and a given leaf id appears
+// at most once in the tree.
+
+const leaf = (id: string): PaneNode => ({ t: 'leaf', id })
+
+/** Every leaf id in the tree, in visual (left→right, top→bottom) order. */
+export function paneIds(node: PaneNode | null): string[] {
+  if (!node) return []
+  return node.t === 'leaf' ? [node.id] : node.children.flatMap(paneIds)
+}
+
+function hasLeaf(node: PaneNode | null, id: string): boolean {
+  return paneIds(node).includes(id)
+}
+
+function lastId(node: PaneNode | null): string | null {
+  const ids = paneIds(node)
+  return ids.length ? ids[ids.length - 1] : null
+}
+
+/** Drop a leaf, collapsing any split left with a single child. */
+function removeLeaf(node: PaneNode | null, id: string): PaneNode | null {
+  if (!node) return null
+  if (node.t === 'leaf') return node.id === id ? null : node
+  const children = node.children
+    .map((c) => removeLeaf(c, id))
+    .filter((c): c is PaneNode => c !== null)
+  if (children.length === 0) return null
+  if (children.length === 1) return children[0]
+  return { ...node, children }
+}
+
+/** Like removeLeaf, but drops every leaf failing `keep` in one pass. */
+export function pruneTree(node: PaneNode | null, keep: (id: string) => boolean): PaneNode | null {
+  if (!node) return null
+  if (node.t === 'leaf') return keep(node.id) ? node : null
+  const children = node.children
+    .map((c) => pruneTree(c, keep))
+    .filter((c): c is PaneNode => c !== null)
+  if (children.length === 0) return null
+  if (children.length === 1) return children[0]
+  return { ...node, children }
+}
+
+/** Swap the id carried by one leaf (used to focus a tab into an existing pane). */
+function replaceLeaf(node: PaneNode, oldId: string, newId: string): PaneNode {
+  if (node.t === 'leaf') return node.id === oldId ? leaf(newId) : node
+  return { ...node, children: node.children.map((c) => replaceLeaf(c, oldId, newId)) }
+}
+
+const sideToDir = (side: Side): 'row' | 'col' =>
+  side === 'left' || side === 'right' ? 'row' : 'col'
+const sideIsBefore = (side: Side): boolean => side === 'left' || side === 'top'
+
+/**
+ * Insert a new leaf adjacent to the `anchorId` leaf on the given side. When the
+ * split directly containing the anchor already runs in the requested direction
+ * the new pane joins it as a sibling; otherwise the anchor leaf is wrapped in a
+ * fresh nested split of the requested direction. Caller must ensure `newId`
+ * isn't already in the tree (splitPane removes it first to move rather than dupe).
+ */
+function insertBeside(node: PaneNode, anchorId: string, newId: string, side: Side): PaneNode {
+  const dir = sideToDir(side)
+  const before = sideIsBefore(side)
+  const wrap = (anchor: PaneNode): PaneNode => ({
+    t: 'split',
+    dir,
+    children: before ? [leaf(newId), anchor] : [anchor, leaf(newId)]
+  })
+
+  // The whole tree is just the anchor leaf → wrap it in a 2-pane split.
+  if (node.t === 'leaf') return node.id === anchorId ? wrap(node) : node
+
+  const idx = node.children.findIndex((c) => c.t === 'leaf' && c.id === anchorId)
+  if (idx !== -1) {
+    if (node.dir === dir) {
+      // Same orientation as the anchor's split → add the new pane as a sibling.
+      const children = [...node.children]
+      children.splice(before ? idx : idx + 1, 0, leaf(newId))
+      return { ...node, children }
+    }
+    // Cross orientation → wrap just the anchor leaf in a nested split.
+    return { ...node, children: node.children.map((c, i) => (i === idx ? wrap(c) : c)) }
+  }
+
+  // Anchor lives deeper down → recurse into the subtree that contains it.
+  return {
+    ...node,
+    children: node.children.map((c) =>
+      hasLeaf(c, anchorId) ? insertBeside(c, anchorId, newId, side) : c
+    )
+  }
+}
+
+/**
+ * Set `sizes` on the split reached by following `path` (a chain of child
+ * indices from the root). Returns the node unchanged if the path doesn't land
+ * on a split, or `sizes` doesn't match that split's child count — so a stale
+ * path (e.g. after the tree was reshaped) is a safe no-op rather than a crash.
+ */
+function setSizesAt(node: PaneNode, path: number[], sizes: number[]): PaneNode {
+  if (path.length === 0) {
+    if (node.t !== 'split' || sizes.length !== node.children.length) return node
+    return { ...node, sizes }
+  }
+  if (node.t !== 'split') return node
+  const [i, ...rest] = path
+  if (i < 0 || i >= node.children.length) return node
+  const child = setSizesAt(node.children[i], rest, sizes)
+  if (child === node.children[i]) return node
+  const children = [...node.children]
+  children[i] = child
+  return { ...node, children }
+}
+
 /** Keep `activeId` pointing at a real pane: itself if still shown, else the last. */
-function fixActive(panes: string[], activeId: string | null): string | null {
-  if (panes.length === 0) return null
-  return activeId && panes.includes(activeId) ? activeId : panes[panes.length - 1]
+function fixActive(panes: PaneNode | null, activeId: string | null): string | null {
+  if (!panes) return null
+  return activeId && hasLeaf(panes, activeId) ? activeId : lastId(panes)
 }
 
 /**
  * Bring `localId` into view as the focused pane without growing the split: if
  * it's already a pane, leave the layout alone; otherwise replace the currently
- * focused pane with it (or open a single pane when there is none).
+ * focused pane (falling back to the last) with it, or open a single pane when
+ * there is none.
  */
-function showInActivePane(panes: string[], activeId: string | null, localId: string): string[] {
-  if (panes.includes(localId)) return panes
-  if (!activeId || panes.length === 0) return [localId]
-  return panes.map((p) => (p === activeId ? localId : p))
+function showInActivePane(
+  panes: PaneNode | null,
+  activeId: string | null,
+  localId: string
+): PaneNode | null {
+  if (hasLeaf(panes, localId)) return panes
+  if (!panes) return leaf(localId)
+  const target = activeId && hasLeaf(panes, activeId) ? activeId : lastId(panes)
+  return target ? replaceLeaf(panes, target, localId) : leaf(localId)
 }
 
 export function workspaceReducer(
@@ -217,14 +387,14 @@ export function workspaceReducer(
       // A freshly opened session takes over the main area as a single pane —
       // unless `split` is set, in which case it opens just to the right of the
       // focused pane, growing the split.
-      let panes: string[]
-      if (action.split && state.panes.length > 0) {
-        panes = [...state.panes]
-        const idx = state.activeId ? panes.indexOf(state.activeId) : -1
-        if (idx === -1) panes.push(action.localId)
-        else panes.splice(idx + 1, 0, action.localId)
+      let panes: PaneNode | null
+      if (action.split && state.panes) {
+        const anchor = fixActive(state.panes, state.activeId)
+        panes = anchor
+          ? insertBeside(state.panes, anchor, action.localId, 'right')
+          : leaf(action.localId)
       } else {
-        panes = [action.localId]
+        panes = leaf(action.localId)
       }
       return {
         ...state,
@@ -288,10 +458,19 @@ export function workspaceReducer(
         }
       }
       // Remove first so dragging an existing pane MOVES it rather than dupes it.
-      const panes = state.panes.filter((p) => p !== action.localId)
-      const idx = panes.indexOf(action.anchorId)
-      if (idx === -1) panes.push(action.localId)
-      else panes.splice(action.side === 'left' ? idx : idx + 1, 0, action.localId)
+      const without = removeLeaf(state.panes, action.localId)
+      let panes: PaneNode | null
+      if (!without) {
+        panes = leaf(action.localId)
+      } else if (hasLeaf(without, action.anchorId)) {
+        panes = insertBeside(without, action.anchorId, action.localId, action.side)
+      } else {
+        // Anchor no longer present (shouldn't happen) — attach beside the last.
+        const fallback = lastId(without)
+        panes = fallback
+          ? insertBeside(without, fallback, action.localId, action.side)
+          : leaf(action.localId)
+      }
       return {
         ...state,
         panes,
@@ -302,9 +481,27 @@ export function workspaceReducer(
 
     case 'closePane': {
       // Never empty the main area — the last pane can't be closed this way.
-      if (state.panes.length <= 1) return state
-      const panes = state.panes.filter((p) => p !== action.localId)
+      if (paneIds(state.panes).length <= 1) return state
+      const panes = removeLeaf(state.panes, action.localId)
       return { ...state, panes, activeId: fixActive(panes, state.activeId) }
+    }
+
+    case 'resizePane': {
+      if (!state.panes) return state
+      const panes = setSizesAt(state.panes, action.path, action.sizes)
+      if (panes === state.panes) return state
+      return { ...state, panes }
+    }
+
+    case 'restorePanes': {
+      // Keep only leaves that restored AND have a live session entry.
+      const panes = pruneTree(
+        action.panes,
+        (id) => action.keep.has(id) && Boolean(state.sessions[id])
+      )
+      // Nothing usable in the saved layout → leave the current panes alone.
+      if (!panes) return state
+      return { ...state, panes, activeId: fixActive(panes, action.activeId) }
     }
 
     case 'setFocus': {
@@ -327,10 +524,10 @@ export function workspaceReducer(
       }))
       // Drop the archived session from the split; if that empties the view,
       // fall back to the most recent other visible tab.
-      let panes = state.panes.filter((p) => p !== action.localId)
-      if (panes.length === 0) {
+      let panes = removeLeaf(state.panes, action.localId)
+      if (!panes) {
         const fb = nextActive(tabs, action.localId, state.hiddenWorkspaces)
-        panes = fb ? [fb] : []
+        panes = fb ? leaf(fb) : null
       }
       return { ...state, tabs, panes, activeId: fixActive(panes, state.activeId) }
     }
@@ -356,10 +553,10 @@ export function workspaceReducer(
       const hiddenIds = new Set(
         state.tabs.filter((t) => t.cwd === action.cwd).map((t) => t.localId)
       )
-      let panes = state.panes.filter((p) => !hiddenIds.has(p))
-      if (panes.length === 0) {
+      let panes = pruneTree(state.panes, (id) => !hiddenIds.has(id))
+      if (!panes) {
         const fb = nextActive(state.tabs, '', hiddenWorkspaces)
-        panes = fb ? [fb] : []
+        panes = fb ? leaf(fb) : null
       }
       return { ...state, hiddenWorkspaces, panes, activeId: fixActive(panes, state.activeId) }
     }
@@ -385,10 +582,10 @@ export function workspaceReducer(
     case 'closeTab': {
       const tabs = state.tabs.filter((t) => t.localId !== action.localId)
       const { [action.localId]: _removed, ...sessions } = state.sessions
-      let panes = state.panes.filter((p) => p !== action.localId)
-      if (panes.length === 0) {
+      let panes = removeLeaf(state.panes, action.localId)
+      if (!panes) {
         const fb = nextActive(tabs, action.localId, state.hiddenWorkspaces)
-        panes = fb ? [fb] : []
+        panes = fb ? leaf(fb) : null
       }
       return { ...state, tabs, sessions, panes, activeId: fixActive(panes, state.activeId) }
     }
@@ -448,6 +645,30 @@ export function workspaceReducer(
         ...state,
         tabs: patchTab(state, action.localId, (t) => ({ ...t, queued: t.queued.slice(1) }))
       }
+
+    case 'clearSession': {
+      const sess = state.sessions[action.localId]
+      if (!sess) return state
+      return {
+        ...state,
+        // Forget the resume id and mark the tab suspended (no live backend) so
+        // the next send/focus revives a brand-new SDK session instead of
+        // resuming the wiped one. Drop any queued/drafted input too — it
+        // belonged to the conversation we just cleared.
+        tabs: patchTab(state, action.localId, (t) => ({
+          ...t,
+          sdkSessionId: undefined,
+          suspended: true,
+          unread: false,
+          queued: [],
+          draft: undefined
+        })),
+        sessions: {
+          ...state.sessions,
+          [action.localId]: sessionReducer(sess, { t: 'clear' })
+        }
+      }
+    }
 
     case 'session': {
       const prev = state.sessions[action.localId]

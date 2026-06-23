@@ -21,23 +21,53 @@ Make sure the `claude` CLI is logged in first (`claude` in a terminal, sign in
 with your subscription). To use the Codex backend, log in with `codex login`.
 See [Requirements](#requirements).
 
-## What works today (Phase 1)
+## Features
 
 - Open a repo, start a Claude Code or Codex session, send a prompt from a DOM
   textarea.
 - Streaming React transcript: **markdown** (syntax-highlighted code), **tool_use**
   as collapsible cards, **tool_result** cards, and **thinking** blocks — all fed
   by partial-token deltas, never blocking the UI.
+- **AskUserQuestion** rendered as a collapsible card showing each question, its
+  options, and the answer you picked.
 - Inline **permission** approve/deny prompts wired to the SDK's `canUseTool`.
 - **Interrupt** a running turn (Esc or Stop).
+- **Clear conversation** in place — wipe a tab's transcript and start a fresh
+  thread without losing the pane.
 - **Persistence**: list prior sessions for a repo and reopen one — the
-  conversation is re-rendered from its JSONL history and resumes.
+  conversation is re-rendered from its JSONL history and resumes. Recent-session
+  cards show AI-generated summaries, loaded lazily as you scroll.
 - **Codex backend**: choose Codex from the launcher to run `codex exec --json`;
   Codex threads are listed from `~/.codex/sessions` and resume by thread id.
 - **Subscription-only (enforced)**: never uses API-key billing. All API-billing
   env vars (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, Bedrock/Vertex toggles)
   are stripped from the Claude Code subprocess, so the only auth path is your
   logged-in `claude` subscription. If a key is present it's shown as ignored.
+
+### Multi-pane workspace
+
+- **Split panes**: drag a session tab from the sidebar to a pane's edge (left,
+  right, top, bottom) to tile it alongside the current one. Panes nest
+  arbitrarily into rows and columns, are resizable by dragging the divider, and
+  the layout persists across restarts.
+- The focused pane shows an accent ring; click any pane to focus it. The sidebar
+  groups sessions that are currently shown together as panes.
+- A recent-screenshot suggestion added or dismissed in one pane disappears across
+  all panes at once.
+
+### Worktree-backed sessions
+
+- Click the git-branch icon (⎇) next to a workspace, describe a task, and the app
+  creates a new branch (slugified from the task), checks it out in a git worktree
+  under `.worktrees/<branch>`, and opens a fresh session there seeded with your
+  task — so independent features run in parallel without touching your main
+  working tree.
+
+### Keyboard shortcuts
+
+- **Esc** — interrupt the focused session.
+- **Cmd/Ctrl+T** — new chat in the focused pane's workspace.
+- **Cmd/Ctrl+B** — toggle the sidebar.
 
 See [`architecture.md`](./architecture.md) for the full design.
 

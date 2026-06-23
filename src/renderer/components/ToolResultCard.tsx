@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { UiImage, UiToolResult } from '../../shared/schema'
+import { useScrollGate } from './scrollGate'
 
 /** One-line preview of a tool result for collapsed headers. */
 export function resultPreview(result: UiToolResult): string {
@@ -16,10 +17,13 @@ export function ToolResultBody({ result }: { result: UiToolResult }) {
   const images = result.images ?? []
   const hasText = result.text.trim().length > 0
   const text = hasText ? result.text : images.length ? '' : '(no output)'
+  const overflowY = useScrollGate('y')
   return (
     <>
       {(hasText || !images.length) && (
-        <pre className="text-[12px] leading-relaxed text-ink-300 font-mono whitespace-pre-wrap break-words max-h-80 overflow-y-auto">
+        <pre
+          className={`text-[12px] leading-relaxed text-ink-300 font-mono whitespace-pre-wrap break-words max-h-80 ${overflowY}`}
+        >
           {text}
         </pre>
       )}
